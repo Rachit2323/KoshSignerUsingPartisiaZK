@@ -10,9 +10,12 @@
   },
   "dependencies": {
     "@noble/curves": "^1.8.0",
+    "@noble/hashes": "^2.0.1",
     "@partisiablockchain/abi-client": "^6.115.0",
     "@partisiablockchain/zk-client": "^6.105.0",
     "@secata-public/bitmanipulation-ts": "^3.4.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "viem": "^2.47.0"
   },
   "devDependencies": {
