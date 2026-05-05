@@ -12,13 +12,23 @@ echo ""
 
 # ── Kill any leftover processes on our ports ──────────────────────────────────
 echo "Clearing old processes on ports 50051 50052 50060 50061 50062 8080 9090..."
+pkill -f "kosh-party" 2>/dev/null || true
+pkill -f "kosh-coordinator" 2>/dev/null || true
+pkill -f "kosh-policy" 2>/dev/null || true
+pkill -f "kosh-gateway" 2>/dev/null || true
+pkill -f "kosh-monitor" 2>/dev/null || true
 lsof -ti:50051,50052,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
-sleep 1
+sleep 2
 
 cleanup() {
   echo ""
   echo "=== Shutting down... ==="
   kill $(jobs -p) 2>/dev/null || true
+  pkill -f "kosh-party" 2>/dev/null || true
+  pkill -f "kosh-coordinator" 2>/dev/null || true
+  pkill -f "kosh-gateway" 2>/dev/null || true
+  pkill -f "kosh-policy" 2>/dev/null || true
+  pkill -f "kosh-monitor" 2>/dev/null || true
   lsof -ti:50051,50052,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
   wait 2>/dev/null || true
   echo "All stopped."
@@ -56,13 +66,13 @@ if [ ! -f "$PARTY_BIN" ]; then
 fi
 
 echo "[5/8] kosh-party #1     (gRPC :50060)"
-PARTY_ID=1 PARTY_PORT=50060 COORD_ADDR=localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party1] /' &
+PARTY_INDEX=1 PORT=50060 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party1] /' &
 
 echo "[6/8] kosh-party #2     (gRPC :50061)"
-PARTY_ID=2 PARTY_PORT=50061 COORD_ADDR=localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party2] /' &
+PARTY_INDEX=2 PORT=50061 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party2] /' &
 
 echo "[7/8] kosh-party #3     (gRPC :50062)"
-PARTY_ID=3 PARTY_PORT=50062 COORD_ADDR=localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party3] /' &
+PARTY_INDEX=3 PORT=50062 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party3] /' &
 
 sleep 2  # wait for all backend services before Vite starts
 

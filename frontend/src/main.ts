@@ -6,7 +6,7 @@ import {
   signTransaction,
   submitSignedTransaction,
   type BrowserThresholdKeyStatus,
-} from "kosh-evm-client/browser";
+} from "./evm-browser";
 import { hexToBytes, type Hex } from "viem";
 
 type FrontendMode = "existing" | "create";
