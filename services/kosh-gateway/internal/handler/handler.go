@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/kosh/gateway/internal/client"
+	"github.com/kosh/gateway/internal/session"
 	bb_pb "github.com/kosh/gateway/pb/bb"
 )
 
@@ -18,10 +19,11 @@ type Handler struct {
 	clients  *client.Clients
 	jobs     *JobStore
 	passkeys *PasskeyStore
+	sessions *session.Store
 }
 
-func New(c *client.Clients, pk *PasskeyStore) *Handler {
-	return &Handler{clients: c, jobs: NewJobStore(), passkeys: pk}
+func New(c *client.Clients, pk *PasskeyStore, sess *session.Store) *Handler {
+	return &Handler{clients: c, jobs: NewJobStore(), passkeys: pk, sessions: sess}
 }
 
 // GET /api/v1/health

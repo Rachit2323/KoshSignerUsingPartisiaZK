@@ -20,14 +20,28 @@ func Middleware(secret string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public endpoints (no JWT required)
 			pub := map[string]bool{
-				"/api/v1/health":                    true,
-				"/api/v1/token":                     true,
-				"/api/v1/passkeys/register/start":   true,
-				"/api/v1/passkeys/register/finish":  true,
-				"/api/v1/passkeys/auth/start":       true,
-				"/api/v1/passkeys/auth/finish":      true,
+				"/api/v1/health":                     true,
+				"/api/v1/token":                      true,
+				"/api/v1/passkeys/register/start":    true,
+				"/api/v1/passkeys/register/finish":   true,
+				"/api/v1/passkeys/auth/start":        true,
+				"/api/v1/passkeys/auth/finish":       true,
+				"/api/v1/passkeys/me":                true,
+				"/api/v1/passkeys/select-key":        true,
+				"/api/v1/passkeys/link-key":          true,
+				"/api/v1/passkeys/create-key":        true,
+				"/api/v1/passkeys/reuse-sign":        true,
+				"/api/v1/runtime/preflight":          true,
+				"/api/v1/runtime/active":             true,
+				"/api/v1/threshold/key-status":       true,
+				"/api/v1/threshold/task-signature":   true,
 			}
 			if pub[r.URL.Path] {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// job polling also public
+			if len(r.URL.Path) > len("/api/v1/jobs/") && r.URL.Path[:len("/api/v1/jobs/")] == "/api/v1/jobs/" {
 				next.ServeHTTP(w, r)
 				return
 			}
