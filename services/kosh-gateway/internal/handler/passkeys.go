@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 
@@ -126,13 +127,17 @@ func (s *PasskeyStore) HandleRegisterFinish(w http.ResponseWriter, r *http.Reque
 	if len(envelope.Credential) > 0 {
 		credBody = envelope.Credential
 	}
+
+	// Reconstruct a clean request with just the credential JSON body.
 	r.Body = io.NopCloser(bytes.NewReader(credBody))
+	r.ContentLength = int64(len(credBody))
+	r.Header.Set("Content-Type", "application/json")
 
 	s.mu.Lock()
 	pending, ok := s.pendingRegs[regID]
 	if !ok {
 		s.mu.Unlock()
-		jsonError(w, "unknown registration_id", http.StatusBadRequest)
+		jsonError(w, "unknown registration_id — did the server restart? Try registering again.", http.StatusBadRequest)
 		return
 	}
 	delete(s.pendingRegs, regID)
@@ -140,7 +145,13 @@ func (s *PasskeyStore) HandleRegisterFinish(w http.ResponseWriter, r *http.Reque
 
 	cred, err := s.wauth.FinishRegistration(s.user, *pending.waData, r)
 	if err != nil {
-		jsonError(w, "finish registration: "+err.Error(), http.StatusBadRequest)
+		// Log the full internal error for debugging
+		errMsg := err.Error()
+		if we, ok2 := err.(interface{ Info() string }); ok2 {
+			errMsg = errMsg + " | detail: " + we.Info()
+		}
+		log.Printf("[passkey] FinishRegistration failed: %s | body=%s", errMsg, string(credBody[:min(len(credBody), 200)]))
+		jsonError(w, "finish registration: "+errMsg, http.StatusBadRequest)
 		return
 	}
 
@@ -218,6 +229,8 @@ func (s *PasskeyStore) HandleAuthFinish(w http.ResponseWriter, r *http.Request) 
 		credBody = envelope.Credential
 	}
 	r.Body = io.NopCloser(bytes.NewReader(credBody))
+	r.ContentLength = int64(len(credBody))
+	r.Header.Set("Content-Type", "application/json")
 
 	s.mu.Lock()
 	pending, ok := s.pendingAuths[authID]
@@ -231,6 +244,7 @@ func (s *PasskeyStore) HandleAuthFinish(w http.ResponseWriter, r *http.Request) 
 
 	cred, err := s.wauth.FinishLogin(s.user, *pending.waData, r)
 	if err != nil {
+		log.Printf("[passkey] FinishLogin failed: %s | body=%s", err.Error(), string(credBody[:min(len(credBody), 200)]))
 		jsonError(w, "finish login: "+err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -341,4 +355,9 @@ func (h *Handler) HandlePasskeysLinkKey(w http.ResponseWriter, r *http.Request) 
 	acct, _ := h.sessions.Get(tok)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"account": acct})
+}
+
+func min(a, b int) int {
+	if a < b { return a }
+	return b
 }
