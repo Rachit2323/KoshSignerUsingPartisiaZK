@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sync"
 
@@ -99,16 +101,25 @@ func (s *PasskeyStore) HandleRegisterStart(w http.ResponseWriter, r *http.Reques
 
 // POST /api/v1/passkeys/register/finish
 func (s *PasskeyStore) HandleRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		RegistrationID string `json:"registration_id"`
+	// Read the full body once so we can both extract registration_id AND pass body to webauthn.
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
 	}
-	// registration_id can come from query or body; try both
+
+	// Extract registration_id from query param or body JSON without consuming it.
 	regID := r.URL.Query().Get("registration_id")
 	if regID == "" {
-		// Decode body to get it, but webauthn also needs the body — use ParseForm workaround
-		json.NewDecoder(r.Body).Decode(&req)
-		regID = req.RegistrationID
+		var envelope struct {
+			RegistrationID string `json:"registration_id"`
+		}
+		json.Unmarshal(bodyBytes, &envelope)
+		regID = envelope.RegistrationID
 	}
+
+	// Restore body so webauthn library can read the credential JSON.
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	s.mu.Lock()
 	pending, ok := s.pendingRegs[regID]
@@ -176,14 +187,23 @@ func (s *PasskeyStore) HandleAuthStart(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/v1/passkeys/auth/finish
 func (s *PasskeyStore) HandleAuthFinish(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		jsonError(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	authID := r.URL.Query().Get("authentication_id")
 	if authID == "" {
 		var req struct {
 			AuthenticationID string `json:"authentication_id"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		json.Unmarshal(bodyBytes, &req)
 		authID = req.AuthenticationID
 	}
+
+	// Restore body for webauthn.
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	s.mu.Lock()
 	pending, ok := s.pendingAuths[authID]
