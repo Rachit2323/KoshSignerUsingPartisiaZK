@@ -3,14 +3,16 @@ package config
 import "os"
 
 type Config struct {
-	Port           string
-	JWTSecret      string
+	Port            string
+	JWTSecret       string
 	CoordinatorAddr string
-	PolicyAddr     string
-	Party1Addr     string
-	Party2Addr     string
-	Party3Addr     string
-	NumParties     int
+	PolicyAddr      string
+	Party1Addr      string
+	Party2Addr      string
+	Party3Addr      string
+	NumParties      int
+	WebAuthnRPID    string
+	WebAuthnOrigin  string
 }
 
 func Load() *Config {
@@ -23,6 +25,8 @@ func Load() *Config {
 		Party2Addr:      getEnv("PARTY_2_ADDR", "localhost:50061"),
 		Party3Addr:      getEnv("PARTY_3_ADDR", "localhost:50062"),
 		NumParties:      3,
+		WebAuthnRPID:    getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnOrigin:  getEnv("WEBAUTHN_ORIGIN", "http://localhost:5173"),
 	}
 }
 

@@ -15,11 +15,13 @@ const (
 )
 
 type Handler struct {
-	clients *client.Clients
+	clients  *client.Clients
+	jobs     *JobStore
+	passkeys *PasskeyStore
 }
 
-func New(c *client.Clients) *Handler {
-	return &Handler{clients: c}
+func New(c *client.Clients, pk *PasskeyStore) *Handler {
+	return &Handler{clients: c, jobs: NewJobStore(), passkeys: pk}
 }
 
 // GET /api/v1/health

@@ -18,8 +18,16 @@ type Claims struct {
 func Middleware(secret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Public endpoints
-			if r.URL.Path == "/api/v1/health" || r.URL.Path == "/api/v1/token" {
+			// Public endpoints (no JWT required)
+			pub := map[string]bool{
+				"/api/v1/health":                    true,
+				"/api/v1/token":                     true,
+				"/api/v1/passkeys/register/start":   true,
+				"/api/v1/passkeys/register/finish":  true,
+				"/api/v1/passkeys/auth/start":       true,
+				"/api/v1/passkeys/auth/finish":      true,
+			}
+			if pub[r.URL.Path] {
 				next.ServeHTTP(w, r)
 				return
 			}
