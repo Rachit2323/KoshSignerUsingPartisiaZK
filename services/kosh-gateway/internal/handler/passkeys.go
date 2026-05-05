@@ -101,25 +101,32 @@ func (s *PasskeyStore) HandleRegisterStart(w http.ResponseWriter, r *http.Reques
 
 // POST /api/v1/passkeys/register/finish
 func (s *PasskeyStore) HandleRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	// Read the full body once so we can both extract registration_id AND pass body to webauthn.
+	// Read full body once.
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		jsonError(w, "read body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Extract registration_id from query param or body JSON without consuming it.
+	// Frontend sends { registration_id, credential: { id, rawId, type, response: {...} } }
+	// WebAuthn library expects the body to be just the credential object directly.
+	var envelope struct {
+		RegistrationID string          `json:"registration_id"`
+		Credential     json.RawMessage `json:"credential"`
+	}
+	json.Unmarshal(bodyBytes, &envelope)
+
 	regID := r.URL.Query().Get("registration_id")
 	if regID == "" {
-		var envelope struct {
-			RegistrationID string `json:"registration_id"`
-		}
-		json.Unmarshal(bodyBytes, &envelope)
 		regID = envelope.RegistrationID
 	}
 
-	// Restore body so webauthn library can read the credential JSON.
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// Use credential sub-object as the body if present, otherwise use full body (fallback).
+	credBody := bodyBytes
+	if len(envelope.Credential) > 0 {
+		credBody = envelope.Credential
+	}
+	r.Body = io.NopCloser(bytes.NewReader(credBody))
 
 	s.mu.Lock()
 	pending, ok := s.pendingRegs[regID]
@@ -193,17 +200,24 @@ func (s *PasskeyStore) HandleAuthFinish(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Frontend sends { authentication_id, credential: { id, rawId, type, response: {...} } }
+	var envelope struct {
+		AuthenticationID string          `json:"authentication_id"`
+		Credential       json.RawMessage `json:"credential"`
+	}
+	json.Unmarshal(bodyBytes, &envelope)
+
 	authID := r.URL.Query().Get("authentication_id")
 	if authID == "" {
-		var req struct {
-			AuthenticationID string `json:"authentication_id"`
-		}
-		json.Unmarshal(bodyBytes, &req)
-		authID = req.AuthenticationID
+		authID = envelope.AuthenticationID
 	}
 
-	// Restore body for webauthn.
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// Use credential sub-object as the body for webauthn.
+	credBody := bodyBytes
+	if len(envelope.Credential) > 0 {
+		credBody = envelope.Credential
+	}
+	r.Body = io.NopCloser(bytes.NewReader(credBody))
 
 	s.mu.Lock()
 	pending, ok := s.pendingAuths[authID]
