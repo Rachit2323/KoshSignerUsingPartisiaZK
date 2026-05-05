@@ -17,7 +17,8 @@ pkill -f "kosh-coordinator" 2>/dev/null || true
 pkill -f "kosh-policy" 2>/dev/null || true
 pkill -f "kosh-gateway" 2>/dev/null || true
 pkill -f "kosh-monitor" 2>/dev/null || true
-lsof -ti:50051,50052,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
+pkill -f "kosh-chain-relay" 2>/dev/null || true
+lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
 sleep 2
 
 cleanup() {
@@ -29,7 +30,8 @@ cleanup() {
   pkill -f "kosh-gateway" 2>/dev/null || true
   pkill -f "kosh-policy" 2>/dev/null || true
   pkill -f "kosh-monitor" 2>/dev/null || true
-  lsof -ti:50051,50052,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
+  pkill -f "kosh-chain-relay" 2>/dev/null || true
+  lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
   wait 2>/dev/null || true
   echo "All stopped."
 }
@@ -65,19 +67,47 @@ if [ ! -f "$PARTY_BIN" ]; then
   (cd "$REPO" && cargo build -p kosh-party --release 2>&1 | tail -3)
 fi
 
-echo "[5/8] kosh-party #1     (gRPC :50060)"
-PARTY_INDEX=1 PORT=50060 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party1] /' &
+# ── kosh-chain-relay (Partisia blockchain client) ─────────────────────────────
+RELAY_BIN="$REPO/target/release/kosh-chain-relay"
+if [ ! -f "$RELAY_BIN" ]; then
+  echo "Building kosh-chain-relay (first run)..."
+  (cd "$REPO" && cargo build -p kosh-chain-relay --release 2>&1 | tail -3)
+fi
 
-echo "[6/8] kosh-party #2     (gRPC :50061)"
-PARTY_INDEX=2 PORT=50061 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party2] /' &
+echo "[5/9] kosh-chain-relay  (gRPC :50053)"
+SIGNER_ADDRESS="${SIGNER_ADDRESS:-03a1e8aba3ba45c1e42d01f688768436cb2b572de0}" \
+PARTISIA_SENDER_KEY="${PARTISIA_SENDER_KEY:-}" \
+PARTISIA_SENDER_ADDRESS="${PARTISIA_SENDER_ADDRESS:-}" \
+PORT=50053 "$RELAY_BIN" 2>&1 | sed 's/^/[relay] /' &
 
-echo "[7/8] kosh-party #3     (gRPC :50062)"
-PARTY_INDEX=3 PORT=50062 COORDINATOR_ADDR=http://localhost:50051 "$PARTY_BIN" 2>&1 | sed 's/^/[party3] /' &
+sleep 1
+
+# ── Party shared config ────────────────────────────────────────────────────────
+# KEYSTORE_MASTER_KEY: 64 hex chars (32 bytes). Generates one if not set.
+if [ -z "$KEYSTORE_MASTER_KEY" ]; then
+  KEYSTORE_MASTER_KEY=$(openssl rand -hex 32)
+  echo "  Generated KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY (set as env var to persist)"
+fi
+
+PARTY_COMMON="COORDINATOR_ADDR=http://localhost:50051 \
+  CHAIN_RELAY_ADDR=http://localhost:50053 \
+  SIGNER_ADDRESS=${SIGNER_ADDRESS:-} \
+  KEYSTORE_DIR=$REPO/.kosh-shares \
+  KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY"
+
+echo "[6/9] kosh-party #1     (gRPC :50060)"
+eval "PARTY_INDEX=1 PORT=50060 $PARTY_COMMON '$PARTY_BIN'" 2>&1 | sed 's/^/[party1] /' &
+
+echo "[7/9] kosh-party #2     (gRPC :50061)"
+eval "PARTY_INDEX=2 PORT=50061 $PARTY_COMMON '$PARTY_BIN'" 2>&1 | sed 's/^/[party2] /' &
+
+echo "[8/9] kosh-party #3     (gRPC :50062)"
+eval "PARTY_INDEX=3 PORT=50062 $PARTY_COMMON '$PARTY_BIN'" 2>&1 | sed 's/^/[party3] /' &
 
 sleep 2  # wait for all backend services before Vite starts
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
-echo "[8/8] frontend          (Vite  http://localhost:5173)"
+echo "[9/9] frontend          (Vite  http://localhost:5173)"
 (cd "$REPO/frontend" && npx vite 2>&1 | sed 's/^/[vite] /') &
 
 echo ""

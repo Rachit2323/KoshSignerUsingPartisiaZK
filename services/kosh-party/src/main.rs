@@ -1,10 +1,13 @@
 mod bulletin_board;
+mod chain_relay_client;
 mod config;
+mod contract_args;
 mod dkg;
 mod gg20;
 mod mta;
 mod paillier;
 mod phase;
+mod share_store;
 mod types;
 
 use anyhow::Result;
@@ -72,7 +75,9 @@ impl PartyService for PartyServiceImpl {
 
         tokio::spawn(async move {
             if let Err(e) = phase::run_sign(
-                &cfg, r.key_id, message_hash, r.tx_tag, signing_subset, task_id, x_i, tx.clone(),
+                &cfg, r.key_id, message_hash, r.tx_tag, signing_subset, task_id,
+                Some(x_i), // placeholder x_i; None = load from keystore
+                tx.clone(),
             )
             .await
             {
