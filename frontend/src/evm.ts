@@ -1,4 +1,3 @@
-export { PartisiaClient, type PartisiaConfig } from "./partisia.js";
 export {
   sepoliaClient,
   baseSepoliaClient,
@@ -9,8 +8,4 @@ export {
   signTransaction,
   submitSignedTransaction,
   parseSignatureBytes,
-} from "./evm.js";
-export {
-  getThresholdKeyStatus,
-  type ThresholdKeyStatus,
-} from "./threshold-read.js";
+} from "kosh-evm-client";

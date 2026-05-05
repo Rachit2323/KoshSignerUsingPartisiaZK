@@ -1,7 +1,7 @@
 target/
 .cargo/
-client/node_modules/
-client/dist/
+frontend/node_modules/
+frontend/dist/
 .DS_Store
 *.swp
 *.swo
