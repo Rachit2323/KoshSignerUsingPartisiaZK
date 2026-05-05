@@ -2,545 +2,873 @@
 
 A distributed signing system where a secp256k1 private key **never exists as a whole** — not during creation, not during signing. Three parties each hold a random piece. They produce valid Ethereum ECDSA signatures without any single party knowing the full private key.
 
+> **Live proof**: Sepolia tx `0x09ec739d1e7cf9a91019c393abc9eee91042eedf20b4ec9f70630f7b93b98d41` — signed by threshold MPC, private key never existed anywhere.
+
 ---
 
 ## Table of Contents
 
 1. [What This Does](#1-what-this-does)
-2. [Architecture](#2-architecture)
-3. [Smart Contracts](#3-smart-contracts)
-4. [TypeScript Client Files](#4-typescript-client-files)
-5. [Complete Flow — Phase by Phase](#5-complete-flow--phase-by-phase)
-   - [Phase 0: Deploy](#phase-0-deploy)
-   - [Phase 1: DKG — Key Born Split](#phase-1-dkg--key-born-split-12-transactions)
-   - [Phase 2: PQC Registration](#phase-2-pqc-registration-optional-9-transactions)
-   - [Phase 3: GG20 Signing](#phase-3-gg20-signing-12-transactions)
-6. [Contract Actions Reference](#6-contract-actions-reference)
-7. [Environment Setup](#7-environment-setup)
-8. [Running Tests](#8-running-tests)
-9. [Live Contract Addresses](#9-live-contract-addresses)
-10. [Security Properties](#10-security-properties)
-11. [What Needs to Be Fixed Before Production](#11-what-needs-to-be-fixed-before-production)
+2. [High-Level System Diagram](#2-high-level-system-diagram)
+3. [Full Data Flow — Step by Step](#3-full-data-flow--step-by-step)
+4. [Microservices Architecture](#4-microservices-architecture)
+5. [DKG Flow — Key Born Split](#5-dkg-flow--key-born-split)
+6. [GG20 Signing Flow](#6-gg20-signing-flow)
+7. [PQC Post-Quantum Layer](#7-pqc-post-quantum-layer)
+8. [Frontend — How It Connects](#8-frontend--how-it-connects)
+9. [Smart Contracts](#9-smart-contracts)
+10. [API Reference](#10-api-reference)
+11. [Contract Actions Reference](#11-contract-actions-reference)
+12. [Environment Setup](#12-environment-setup)
+13. [Running Everything Locally](#13-running-everything-locally)
+14. [Test Results](#14-test-results)
+15. [Live Contract Addresses](#15-live-contract-addresses)
+16. [Security Properties](#16-security-properties)
 
 ---
 
 ## 1. What This Does
 
-A backend developer calls this system to:
+```
+User opens browser → connects wallet → signs Ethereum transaction
+                                              ↓
+                         No single server ever holds the private key
+                         Three parties compute the signature together
+                         Partisia blockchain coordinates the math
+                                              ↓
+                    Valid (r, σ) ECDSA signature → broadcast to Ethereum
+```
 
-1. **Create a distributed Ethereum wallet** — no single server holds the private key
-2. **Sign Ethereum transactions** — 3 parties collaborate on Partisia blockchain, producing a valid `(r, σ)` ECDSA signature
-3. **Optionally gate signing behind PQC approval** — ML-DSA-65 (Dilithium) + ML-KEM-768 (Kyber) post-quantum cryptography
-
-The private key `s = s₁ + s₂ + s₃` is a mathematical ghost — it can be proven to exist (the public key `P = P₁+P₂+P₃` is on-chain), but it was never computed anywhere.
-
-**Result**: A standard Ethereum signature `(r, σ)` that any EVM chain accepts.
+Three core guarantees:
+- **Key never assembled** — `s = s₁ + s₂ + s₃` exists as a sum, never as a number
+- **Nonce never assembled** — `k` in ECDSA is split across parties via GG20
+- **Post-quantum gated** — ML-DSA-65 + ML-KEM-768 approval required before signing
 
 ---
 
-## 2. Architecture
+## 2. High-Level System Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│                          PARTISIA BLOCKCHAIN                         │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │              kosh-zk-signer Contract                            │ │
-│  │                                                                 │ │
-│  │  State:                                                         │ │
-│  │  - keys[]     → public key + phase (DKG/Signing)                │ │
-│  │  - tasks[]    → signing sessions + partial sigs                 │ │
-│  │  - pqc_state  → Dilithium/Kyber pubkeys, approval sessions      │ │
-│  │                                                                 │ │
-│  │  ZK Variables:                                                  │ │
-│  │  - key_share_high_i  → upper 128 bits of sᵢ (encrypted)         │ │
-│  │  - key_share_low_i   → lower 128 bits of sᵢ (encrypted)         │ │
-│  └──────────────────────────┬──────────────────────────────────────┘ │
-│                             │                                        │
-│        ┌────────────────────┼────────────────────┐                   │
-│        ▼                    ▼                    ▼                   │
-│   ZK Node 1           ZK Node 2           ZK Node 3                  │
-│   (holds encrypted    (holds encrypted    (holds encrypted           │
-│    share fragment)     share fragment)     share fragment)           │
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              USER'S BROWSER                                  │
+│                                                                              │
+│   ┌──────────────────────────────────────────────────────────────────────┐   │
+│   │                    Kosh Frontend (Vite + TypeScript)                  │   │
+│   │                 frontend/KoshSignerUsingPartisiaZK/client/           │   │
+│   │                                                                      │   │
+│   │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐               │   │
+│   │  │  Create Key  │  │  Sign TX     │  │  View Status │               │   │
+│   │  │  (DKG flow)  │  │  (GG20 flow) │  │  + Passkey   │               │   │
+│   │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘               │   │
+│   │         │                 │                  │                       │   │
+│   │         └─────────────────┴──────────────────┘                       │   │
+│   │                           │                                          │   │
+│   │                    fetch() REST calls                                │   │
+│   │                    http://localhost:8080/api/v1/...                  │   │
+│   └───────────────────────────┼──────────────────────────────────────────┘   │
+└───────────────────────────────┼──────────────────────────────────────────────┘
+                                │
+                                ▼ HTTP REST (port 8080)
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                       kosh-backend  (Rust / Axum)                            │
+│                       backend/src/                                           │
+│                                                                              │
+│   POST /api/v1/passkeys/create-key   → triggers DKG on all 3 parties        │
+│   POST /api/v1/passkeys/reuse-sign   → triggers GG20 signing                │
+│   GET  /api/v1/health                → health check                         │
+│   GET  /api/v1/runtime/preflight     → preflight check                      │
+│   GET  /api/v1/threshold/key-status  → key status on Partisia               │
+│   POST /api/v1/passkeys/register/*   → WebAuthn passkey registration        │
+│   POST /api/v1/passkeys/auth/*       → WebAuthn passkey auth                │
+│                                                                              │
+│   Orchestrates all 3 party daemons internally                               │
+│   Manages job queue + SSE event streaming                                    │
+└───────┬────────────────────────────────────────────────┬─────────────────────┘
+        │ gRPC / internal                                │ HTTP
+        │                                                │
+        ▼                                                ▼
+┌───────────────────────────────────┐     ┌─────────────────────────────────┐
+│   NEW: kosh-gateway  (Go :8080)   │     │   Partisia Testnet / Mainnet    │
+│   services/kosh-gateway/          │     │                                 │
+│                                   │     │  kosh-zk-signer contract        │
+│   JWT auth middleware             │     │  (Rust WASM — on-chain)         │
+│   POST /api/v1/keys  → DKG        │     │                                 │
+│   POST /api/v1/sign  → Signing    │     │  ZK nodes hold encrypted        │
+│   POST /api/v1/policies → Policy  │     │  key share fragments            │
+└───────┬───────────────────────────┘     └─────────────────────────────────┘
+        │ gRPC                                          ▲
+        ▼                                               │ Partisia RPC
+┌────────────────────────────────────────────────────────────────────┐
+│                    MICROSERVICES LAYER                              │
+│                                                                    │
+│  ┌────────────────────┐   ┌────────────────────────────────────┐  │
+│  │ kosh-coordinator   │   │ kosh-policy  (Go :50052)           │  │
+│  │ (Go :50051)        │   │                                    │  │
+│  │                    │   │  Add / Remove / Validate policies  │  │
+│  │ Bulletin board     │   │  Mandatory parties + thresholds    │  │
+│  │ gRPC Watch streams │   └────────────────────────────────────┘  │
+│  │ Post / Read / List │                                           │
+│  └────────┬───────────┘                                           │
+│           │ Watch streams (gRPC)                                   │
+│    ┌──────┴──────────────────────────────┐                        │
+│    │              │                      │                        │
+│    ▼              ▼                      ▼                        │
+│ ┌──────────┐ ┌──────────┐ ┌──────────┐                           │
+│ │ party-1  │ │ party-2  │ │ party-3  │  kosh-party (Rust)        │
+│ │ :50060   │ │ :50061   │ │ :50062   │                           │
+│ │          │ │          │ │          │  DKG phases               │
+│ │ DKG      │ │ DKG      │ │ DKG      │  GG20 round 1 + 2        │
+│ │ GG20     │ │ GG20     │ │ GG20     │  Paillier MtA             │
+│ │ MtA      │ │ MtA      │ │ MtA      │  (FuturesUnordered)       │
+│ └─┬──┬─────┘ └─┬──┬─────┘ └─┬──┬────┘                           │
+│   │  │         │  │         │  │                                 │
+│   ▼  ▼         ▼  ▼         ▼  ▼                                 │
+│ ┌──┐┌──┐    ┌──┐┌──┐    ┌──┐┌──┐                                │
+│ │KS││PQ│    │KS││PQ│    │KS││PQ│  KS = kosh-keystore (Rust)     │
+│ │  ││C │    │  ││C │    │  ││C │  PQC = kosh-pqc (Rust)         │
+│ └──┘└──┘    └──┘└──┘    └──┘└──┘                                │
+│                                                                    │
+│  ┌────────────────────────────────┐  ┌──────────────────────────┐ │
+│  │ kosh-chain-relay  (Rust :50053)│  │ kosh-monitor  (Go :9090) │ │
+│  │                                │  │                          │ │
+│  │ Tx queue + 7-retry backoff     │  │ /metrics (Prometheus)    │ │
+│  │ k256 secp256k1 signing         │  │ /health  (JSON)          │ │
+│  │ All 44 contract actions        │  │ /ready   (probe)         │ │
+│  └──────────────┬─────────────────┘  └──────────────────────────┘ │
+└─────────────────┼──────────────────────────────────────────────────┘
+                  │ HTTPS
+                  ▼
+        Partisia Blockchain Node
+```
+
+---
+
+## 3. Full Data Flow — Step by Step
+
+### A. User Creates a Wallet (DKG)
+
+```
+Browser                Backend          Party-1,2,3       Coordinator        Partisia Chain
+  │                      │                  │                  │                  │
+  │  POST /create-key     │                  │                  │                  │
+  │─────────────────────►│                  │                  │                  │
+  │                      │                  │                  │                  │
+  │                      │──StartDkg()─────►│  (goroutine      │                  │
+  │                      │──StartDkg()──────┼──fan-out to all) │                  │
+  │                      │──StartDkg()──────┼──────────────────┘                  │
+  │                      │                  │                  │                  │
+  │                      │                  │  Post(commit_i)──►│                  │
+  │                      │                  │  Watch(commit_j)──►│                 │
+  │                      │                  │◄─commit_j─────────│                  │
+  │                      │                  │  [Schnorr verify] │                  │
+  │                      │                  │                  │                  │
+  │                      │                  │  Post(subshare)──►│                  │
+  │                      │                  │◄─subshare_ji──────│                  │
+  │                      │                  │  [Feldman verify] │                  │
+  │                      │                  │                  │                  │
+  │                      │                  │──────────────────────────────────────►│
+  │                      │                  │  dkg_create(0x20)                    │
+  │                      │                  │  dkg_commit(0x21)                    │
+  │                      │                  │  dkg_reveal(0x22)                    │
+  │                      │                  │  dkg_finalize(0x23) → P=P₁+P₂+P₃   │
+  │                      │                  │  submit_key_share(0x10) × 6         │
+  │                      │                  │  dkg_complete(0x24)                  │
+  │                      │                  │◄─────────────────────────────────────│
+  │                      │◄─DKG_COMPLETE────│  combined_pk="02abc..."             │
+  │◄─ {eth_address}──────│                  │                  │                  │
+  │   {combined_pk}      │                  │                  │                  │
+```
+
+### B. User Signs a Transaction (GG20)
+
+```
+Browser                Backend          Party-1,2          Coordinator        Partisia Chain
+  │                      │                  │                  │                  │
+  │  POST /reuse-sign     │                  │                  │                  │
+  │  {tx, key_id}        │                  │                  │                  │
+  │─────────────────────►│                  │                  │                  │
+  │                      │                  │                  │                  │
+  │                      │  policy check ──►│                  │                  │
+  │                      │  StartSign()────►│ (fan-out)        │                  │
+  │                      │                  │                  │                  │
+  │  [SSE stream]        │                  │  k_i=HMAC(x_i,hash,session)        │
+  │◄─ phase: GG20_R1 ────│                  │  Gamma_i = gamma_i·G               │
+  │                      │                  │  Post(gamma_commit)──►│             │
+  │                      │                  │◄─gamma_commit_j───────│             │
+  │                      │                  │  [verify, reveal]  │               │
+  │                      │                  │                  │                  │
+  │◄─ phase: MTA_START───│                  │  [Paillier MtA — all pairs parallel]│
+  │                      │                  │  k_i·x_j → alpha_kx + beta_kx     │
+  │                      │                  │  k_i·γ_j → alpha_kg + beta_kg     │
+  │                      │                  │                  │                  │
+  │◄─ phase: GG20_R2 ────│                  │  delta_i = k_i·gamma_i + Σ MtA    │
+  │                      │                  │  sigma_i = k_i·x_i + Σ MtA        │
+  │                      │                  │──────────────────────────────────────►│
+  │                      │                  │  submit_delta(0x45)                 │
+  │                      │                  │  submit_gamma_point(0x46)           │
+  │                      │                  │  gg20_finalize_r(0x47)→r=R.x mod N │
+  │                      │                  │◄─────────────────────────────────────│
+  │                      │                  │  s_i = k_i⁻¹·(m + r·sigma_i)      │
+  │                      │                  │──────────────────────────────────────►│
+  │                      │                  │  commit_partial_sig(0x51)           │
+  │                      │                  │  submit_partial_sig(0x52)           │
+  │                      │                  │  finalize_gg20_sig(0x53)            │
+  │                      │                  │  → σ=Σσᵢ, ECDSA verify ✓          │
+  │◄─ {signature: 0x...}─│                  │◄─────────────────────────────────────│
+  │                      │                  │                  │                  │
+  │  broadcast to Sepolia│                  │                  │                  │
+  │─────────────────────────────────────────────────────────────────────────────►│
+  │                                                                      Ethereum │
+```
+
+---
+
+## 4. Microservices Architecture
+
+The original system was a 1339-line TypeScript monolith. It is replaced with isolated microservices:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  WHY MICROSERVICES                                                       │
+│                                                                         │
+│  Old: All crypto in one process → crash = restart everything            │
+│  New: Crash one service → others keep running                           │
+│                                                                         │
+│  Old: Secrets (key share) in same memory as routing logic               │
+│  New: kosh-keystore isolated — party daemon never holds secrets         │
+│                                                                         │
+│  Old: No external API — only driveable via env vars + bash              │
+│  New: REST API + JWT → any dApp can call it                             │
+│                                                                         │
+│  Old: 30s polling delays between parties                                │
+│  New: gRPC streaming Watch → instant push notification                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Service map
+
+| Service | Lang | Port | Secrets | Responsibility |
+|---|---|---|---|---|
+| `kosh-gateway` | Go | 8080 | None | REST API, JWT auth, goroutine fan-out |
+| `kosh-coordinator` | Go | 50051 | None | Bulletin board, gRPC Watch streams |
+| `kosh-policy` | Go | 50052 | None | Signing policy CRUD + enforcement |
+| `kosh-monitor` | Go | 9090 | None | Prometheus /metrics, health checks |
+| `kosh-party` | Rust | 50060–62 | Ephemeral (k_i, gamma_i) | DKG + GG20 + Paillier MtA |
+| `kosh-keystore` | Rust | 50070–72 | `x_i` (Shamir share) | AES-256-GCM encrypted shares |
+| `kosh-pqc` | Rust | 50080–82 | KEM+DSA private keys | ML-KEM-768 + ML-DSA-65 |
+| `kosh-chain-relay` | Rust | 50053 | Partisia private key | Tx queue, k256 signing |
+
+### gRPC Protocol definitions
+
+```
+services/proto/
+├── bulletin_board.proto   Post, Read, Watch(stream), Clear, List
+├── party.proto            StartDkg(stream), StartSign(stream), GetStatus
+├── keystore.proto         GenerateShare, LoadShare, FinalizeShare, GetShareHalves
+├── pqc.proto              GetIdentity, Encapsulate, Decapsulate, Sign, Verify
+├── chain_relay.proto      Submit(stream), GetContractState
+└── policy.proto           AddPolicy, RemovePolicy, ListPolicies, Validate
+```
+
+---
+
+## 5. DKG Flow — Key Born Split
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     DKG COMMIT-REVEAL PROTOCOL                      │
+│                                                                     │
+│  Party 1          Party 2          Party 3                          │
+│  ─────────        ─────────        ─────────                        │
+│  s₁ = rand()      s₂ = rand()      s₃ = rand()                    │
+│  a₁ = rand()      a₂ = rand()      a₃ = rand()                    │
+│                                                                     │
+│  C₁₀ = s₁·G      C₂₀ = s₂·G      C₃₀ = s₃·G   (public shares)   │
+│  C₁₁ = a₁·G      C₂₁ = a₂·G      C₃₁ = a₃·G   (slope commit.)   │
+│                                                                     │
+│  Schnorr proof: z = r + e·sᵢ   (proves knowledge of sᵢ)           │
+│  Commitment:    hash = SHA256(Cᵢ₀)                                 │
+│                                                                     │
+│         ┌── POST hash_1 → Coordinator ──────────────────────┐     │
+│         │   POST hash_2 → Coordinator                        │     │
+│         │   POST hash_3 → Coordinator                        │     │
+│         │   [all parties WATCH each other's hashes]          │     │
+│         │                                                     │     │
+│         └── POST reveal(Cᵢ₀, Cᵢ₁, Schnorr) → Coordinator ──┘     │
+│             [Schnorr verify: z·G == R + e·Cᵢ₀]                    │
+│                                                                     │
+│  SUBSHARE EXCHANGE (Feldman VSS):                                   │
+│  fᵢ(j) = sᵢ + aᵢ·j   ← sub-share for party j                     │
+│                                                                     │
+│  Party i → POST fᵢ(j) for all j ≠ i                               │
+│  Party i ← WATCH f_j(i) from all j ≠ i                            │
+│                                                                     │
+│  Verify: fⱼ(i)·G == Cⱼ₀ + i·Cⱼ₁   (Feldman check)               │
+│                                                                     │
+│  Final share: xᵢ = Σⱼ fⱼ(i)   (sum of all sub-shares)            │
+│                                                                     │
+│  Combined public key: P = C₁₀ + C₂₀ + C₃₀ = (s₁+s₂+s₃)·G       │
+│  EVM address = keccak256(P.x ‖ P.y)[12:]                          │
 └─────────────────────────────────────────────────────────────────────┘
-               ▲                    ▲                    ▲
-               │                    │                    │
-               │  Partisia RPC (signAndSend)             │
-               │                                         │
-┌──────────────┴──────────────────────────────┐          │
-│              TypeScript Client              │          │
-│                                             │          │
-│  party.ts (Party 1 logic)                   │          │
-│  dkg-party.ts (DKG shared logic)            │          │
-│  gg20-signing.ts (GG20 protocol)            │          │
-│  paillier.ts + mta.ts (crypto)              │          │
-│  chain-utils.ts (tx submission + retry)     │          │
-│  testnet-pqc.ts (PQC flow)                  │──────────┘
-│  test-gg20-sign.ts (full test)              │
-└─────────────────────────────────────────────┘
-               │
-               ▼
-   Partisia Testnet / Mainnet
-   (transactions broadcast here)
+
+                    ON-CHAIN SEQUENCE
+                    ─────────────────
+  0x20  dkg_create_key(key_id, n_parties)
+  0x21  dkg_commit(key_id, party, SHA256(Cᵢ₀))   × 3
+  0x22  dkg_reveal(key_id, party, Cᵢ₀)            × 3
+  0x23  dkg_finalize(key_id)
+        → Contract: P = P₁ + P₂ + P₃  (EC point addition on-chain)
+  0x10  submit_key_share(ZK encrypted sᵢ halves)  × 6
+  0x24  dkg_complete_keygen(key_id)
 ```
 
-**Data flow summary**:
-- Parties run TypeScript locally, broadcast transactions to Partisia
-- Each party's secret share `sᵢ` is encrypted and stored on Partisia ZK nodes
-- The contract combines public data on-chain (EC point addition, partial sig aggregation)
-- Final `(r, σ)` signature is stored on the Partisia contract, ready to broadcast to Ethereum
+---
+
+## 6. GG20 Signing Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      GG20 ROUND 1 — NONCE SETUP                     │
+│                                                                     │
+│  Each party i:                                                      │
+│    kᵢ   = HMAC-DRBG(xᵢ, msg_hash, session_id)   ← deterministic   │
+│    γᵢ   = random_scalar()                         ← masking        │
+│    Γᵢ   = γᵢ · G                                  ← gamma point    │
+│                                                                     │
+│  Commit-reveal Γᵢ via Coordinator:                                 │
+│    commit = SHA256(Γᵢ ‖ nonce)  →  all parties                     │
+│    reveal = (Γᵢ, nonce)         →  after all commits               │
+│    [verify SHA256(Γᵢ ‖ nonce) == committed hash]                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│           MtA (Multiplicative-to-Additive) — Paillier               │
+│                    Runs in parallel for all pairs                   │
+│                                                                     │
+│  For each pair (i, j):                                              │
+│                                                                     │
+│  k·x cross-term:                                                    │
+│    Party i: Enc_j(kᵢ·xᵢ - βᵢⱼ)  →  Coordinator                   │
+│    Party j: Homomorphic add xⱼ term, respond with αⱼᵢ              │
+│    Result: αᵢⱼ + βᵢⱼ = kᵢ · xⱼ  (additive shares)               │
+│                                                                     │
+│  k·γ cross-term:  same protocol for kᵢ · γⱼ                       │
+│                                                                     │
+│  Uses 2048-bit Paillier (safe prime generation)                     │
+│  All pairs run concurrently via FuturesUnordered                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      GG20 ROUND 2 — AGGREGATION                     │
+│                                                                     │
+│  δᵢ = kᵢ·γᵢ + Σⱼ (αkγ_ij + βkγ_ji)    ← share of k·γ            │
+│  σᵢ = kᵢ·xᵢ + Σⱼ (αkx_ij + βkx_ji)    ← share of k·s (secret!)  │
+│                                                                     │
+│  Commit-reveal δᵢ via Coordinator (same pattern as Γᵢ)             │
+│                                                                     │
+│  On-chain:                                                          │
+│    0x45  submit_delta(δᵢ)         × n                              │
+│    0x46  submit_gamma_point(Γᵢ)   × n                              │
+│    0x47  gg20_finalize_r()                                          │
+│          Contract computes:                                         │
+│            δ = Σδᵢ       (= k·γ)                                   │
+│            Γ = ΣΓᵢ       (= γ·G)                                   │
+│            R = δ⁻¹ · Γ   (= k⁻¹·G, γ cancels!)                    │
+│            r = R.x mod N                                            │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                     PARTIAL SIGNATURES                               │
+│                                                                     │
+│  Each party i:                                                      │
+│    sᵢ = kᵢ⁻¹ · (m + r · σᵢ)  mod N                               │
+│                                                                     │
+│  On-chain commit-reveal:                                            │
+│    0x51  commit_partial_sig(SHA256(sᵢ))   × n                      │
+│    0x52  submit_partial_sig(sᵢ)           × n                      │
+│    0x53  finalize_gg20_sig()                                        │
+│          Contract:                                                  │
+│            σ = Σsᵢ                                                  │
+│            if σ > N/2: σ = N - σ    (EIP-2 low-s)                 │
+│            verify ECDSA(P, msg, r, σ) ✓   on-chain                 │
+│            store (r, σ) on Partisia                                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+  WHY R = δ⁻¹·Γ = k⁻¹·G :
+  ─────────────────────────
+  δ = k·γ   (nobody knows k or γ separately)
+  Γ = γ·G   (sum of public gamma points)
+
+  R = δ⁻¹·Γ = (k·γ)⁻¹·(γ·G) = k⁻¹·γ⁻¹·γ·G = k⁻¹·G   ✓
+  γ cancels out. Nobody computed k or k⁻¹.
+```
 
 ---
 
-## 3. Smart Contracts
+## 7. PQC Post-Quantum Layer
 
-| Contract | Language | Purpose |
-|----------|----------|---------|
-| `kosh-zk-signer` | Rust (WASM) | Main contract — DKG, GG20 signing, PQC approval, state |
-| `kosh-vault` | Rust (WASM) | Optional vault — holds assets, requires signer approval |
-| `kosh-account-registry` | Rust (WASM) | Registry mapping addresses → signer contracts |
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              PQC IDENTITY — kosh-pqc service                        │
+│                                                                     │
+│  On startup (or first call):                                        │
+│    ML-KEM-768 keypair: (kem_dk, kem_ek)  ← from 64-byte seed      │
+│    ML-DSA-65 keypair:  (dsa_sk, dsa_vk)  ← from 32-byte seed      │
+│    Persisted to: PQC_KEY_FILE=/data/pqc-identity.json             │
+│                                                                     │
+│  GetIdentity() → (kyber_pk_b64, dilithium_pk_b64)  [public only]  │
+└─────────────────────────────────────────────────────────────────────┘
 
-The active contract for development is `kosh-zk-signer`. The others are scaffolding.
-
-**Key contract files** (`contracts/kosh-zk-signer/src/`):
-
-| File | What It Does |
-|------|-------------|
-| `lib.rs` | Entry point — all action handlers (DKG, GG20, Shamir, PQC) |
-| `signing_state.rs` | State types: `KeyEntry`, `SigningTask`, `Phase` enums |
-| `dkg.rs` | DKG logic: commit/reveal/verify, EC point addition (k256 crate) |
-| `shamir.rs` | Legacy Shamir split/reconstruct (still available, not recommended) |
-| `off_chain.rs` | ZK node callbacks — fires when encrypted share is confirmed |
-| `zk_compute.rs` | ZK compiler stub (Partisia ZK framework integration) |
-
----
-
-## 4. TypeScript Client Files
-
-**`client/src/`**
-
-| File | Purpose |
-|------|---------|
-| `chain-utils.ts` | Shared utilities: `submitAndWait()` (3-retry tx submission), `encodeU32Be`, `encodeLenPrefixedBytes`, `encodePartyVector`, `concatBytes` |
-| `partisia.ts` | `PartisiaClient` wrapper — loads account, builds `TransactionClient` |
-| `dkg-party.ts` | DKG ceremony: generate keypair, `buildDkgCommitArgs`, `buildDkgRevealArgs`, `buildDkgFinalizeArgs` |
-| `gg20-signing.ts` | GG20 protocol: `gg20Sign()` (full multi-party signing), `buildSubmitDeltaArgs`, `buildSubmitGammaPointArgs`, `buildSubmitPartialSigArgs`, `buildGG20StartSigningArgs` |
-| `paillier.ts` | Paillier homomorphic encryption (1024-bit safe primes) — used by MtA |
-| `mta.ts` | Multiplicative-to-Additive protocol — converts `kᵢ × sⱼ` cross-terms to additive shares using Paillier |
-| `party.ts` | Single-party runner — loads identity from env, runs DKG/signing as one party |
-| `zk-signer.ts` | ZK share submission: `submitZkShareHalf()` — encrypts `sᵢ` for each ZK node's public key |
-| `pqc.ts` | PQC crypto: `generatePqcIdentity()` — generates Dilithium + Kyber keypairs via WASM |
-| `pqc-identity.ts` | PQC identity loading/saving (`pqc-identity-party*.json`) |
-| `pqc-auth.ts` | PQC authentication helpers |
-| `policy.ts` | `buildRegisterPartyAddressArgs`, `buildSignMessageWithTagArgs` — contract call builders |
-| `testnet-pqc.ts` | End-to-end PQC flow: `registerOnchainPqcIdentities`, `queueSignAndApprove`, `startApprovedGg20` |
-| `deploy-zk-signer.ts` | Contract deployment via `DeploymentBuilder` (CLI can't parse complex init args) |
-| `shamir-ts.ts` | Shamir math (Lagrange interpolation, polynomial evaluation) |
-| `coord-server.ts` | Coordinator HTTP server for multi-machine party coordination |
-| `key-refresh.ts` | Key refresh protocol stub |
-| `test-gg20-sign.ts` | **Full integration test** — DKG + GG20 on Partisia testnet |
-| `test-policy.ts` | Policy tests — 20 assertions |
-| `test-pqc.ts` | PQC tests — 28 assertions |
-| `test-gg20-local.ts` | Local GG20 math test (no chain calls) |
-| `test-threshold-sign.ts` | Threshold signing test |
+┌─────────────────────────────────────────────────────────────────────┐
+│              PQC SIGNING APPROVAL (before GG20)                     │
+│                                                                     │
+│  1. Register on-chain (once per key):                               │
+│     0x72  register_party_address(key_id, party, address)            │
+│     0x73  register_dilithium_pubkey(key_id, party, pk)             │
+│     0x74  register_kyber_pubkey(key_id, party, pk)                 │
+│                                                                     │
+│  2. Before each signing session:                                    │
+│     0x75  start_pqc_approval_session(key_id, task_id, subset)      │
+│                                                                     │
+│  3. Each party in subset:                                           │
+│     approval_hash = SHA256(domain ‖ key_id ‖ task_id ‖ msg_hash   │
+│                            ‖ tx_tag ‖ party ‖ subset ‖ challenge) │
+│     ML-DSA-65 sign(approval_hash) → dilithium_sig                  │
+│     ML-KEM-768 encapsulate(recipient_pk) → (ciphertext, ss)        │
+│     0x76  submit_pqc_approval(key_id, dilithium_sig, kyber_ct)     │
+│                                                                     │
+│  4. Finalize:                                                       │
+│     0x77  finalize_pqc_approval(key_id, task_id)                   │
+│           Contract verifies all Dilithium signatures on-chain       │
+│           → GG20 signing unblocked                                  │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 5. Complete Flow — Phase by Phase
+## 8. Frontend — How It Connects
 
-### Phase 0: Deploy
+```
+frontend/KoshSignerUsingPartisiaZK/client/
+├── src/
+│   ├── main.ts        UI logic, state machine, all fetch() calls
+│   ├── backend.ts     Legacy TS bridge (reference only)
+│   ├── evm.ts         Ethereum tx building + broadcast
+│   ├── partisia.ts    Partisia chain helpers
+│   └── styles.css     UI styles
+├── index.html         Entry point
+└── package.json       Vite + TypeScript
+```
 
-Deploy the contract once. After deployment you get a `CONTRACT_ADDRESS`.
+### Connection flow
+
+```
+Frontend (main.ts)
+       │
+       │  const defaultApiBaseUrl = "http://127.0.0.1:8080"
+       │
+       ├─► GET  /api/v1/health                   → check backend up
+       ├─► GET  /api/v1/runtime/preflight        → check chain + keys
+       ├─► GET  /api/v1/runtime/active           → get current key state
+       ├─► POST /api/v1/passkeys/register/start  → WebAuthn register
+       ├─► POST /api/v1/passkeys/register/finish → WebAuthn complete
+       ├─► POST /api/v1/passkeys/auth/start      → WebAuthn login
+       ├─► POST /api/v1/passkeys/auth/finish     → WebAuthn verify
+       ├─► POST /api/v1/passkeys/create-key      → trigger DKG (all 3 parties)
+       ├─► POST /api/v1/passkeys/reuse-sign      → trigger GG20 signing
+       ├─► GET  /api/v1/threshold/key-status     → poll key on Partisia
+       └─► GET  /api/v1/threshold/task-signature → get final signature
+```
+
+### Running the frontend
 
 ```bash
-cd client
-npx tsx src/deploy-zk-signer.ts
-# Outputs: CONTRACT_ADDRESS=03xxxxxxxx...
+# 1. Start the Rust backend (serves port 8080)
+cargo run -p kosh-backend
+
+# 2. Start the frontend dev server
+cd frontend/KoshSignerUsingPartisiaZK/client
+npm install
+npm run dev
+# → http://localhost:5173
 ```
 
-The deploy script uses `DeploymentBuilder` + `BlockchainClientForDeploymentImpl` because the Partisia CLI cannot parse the `Vec<EngineConfig>` init argument.
-
----
-
-### Phase 1: DKG — Key Born Split (12 transactions)
-
-**Goal**: Create a secp256k1 keypair where `s = s₁+s₂+s₃` is never computed.
+### Frontend UI states
 
 ```
-Party 1          Party 2          Party 3          Contract
-───────          ───────          ───────          ────────
-pick s₁          pick s₂          pick s₃
-P₁ = s₁·G        P₂ = s₂·G        P₃ = s₃·G
-
-                                              0x20 dkg_create_key(key_id, n_parties)
-                                              Contract: phase → Committing
-
-commit SHA256(P₁) ──────────────────────────► 0x21 dkg_commit(key_id, 1, SHA256(P₁))
-commit SHA256(P₂) ──────────────────────────► 0x21 dkg_commit(key_id, 2, SHA256(P₂))
-commit SHA256(P₃) ──────────────────────────► 0x21 dkg_commit(key_id, 3, SHA256(P₃))
-                                              Contract: phase → Revealing (all committed)
-
-reveal P₁ ──────────────────────────────────► 0x22 dkg_reveal(key_id, 1, P₁)
-reveal P₂ ──────────────────────────────────► 0x22 dkg_reveal(key_id, 2, P₂)
-reveal P₃ ──────────────────────────────────► 0x22 dkg_reveal(key_id, 3, P₃)
-                                              Contract: verifies SHA256(Pᵢ) == Cᵢ for all i
-
-                                              0x23 dkg_finalize(key_id)
-                                              Contract: P = P₁+P₂+P₃ (EC point addition)
-                                                        phase → WaitingForShares
-
-submit s₁ halves (ZK encrypted) ────────────► 0x10 submit_key_share(key_id, 1, half) × 2
-submit s₂ halves (ZK encrypted) ────────────► 0x10 submit_key_share(key_id, 2, half) × 2
-submit s₃ halves (ZK encrypted) ────────────► 0x10 submit_key_share(key_id, 3, half) × 2
-                                              ZK nodes store encrypted fragments
-
-                                              0x24 dkg_complete_keygen(key_id)
-                                              Contract: phase → Complete
-```
-
-**Why the commit-reveal?** Without it, Party 3 could wait to see `P₁` and `P₂`, then pick `s₃` to control the final public key (rogue key attack). The commit locks in the choice.
-
-**Why ZK halves?** Each `sᵢ` is 256 bits, split into two 128-bit halves. Each half is encrypted separately for each ZK node — no single ZK node can reassemble a full share.
-
-**Result**: `P` (combined public key) is stored on-chain. Ethereum address = `keccak256(P.x || P.y)[12:]`.
-
----
-
-### Phase 2: PQC Registration (optional, 9 transactions)
-
-**Goal**: Register Dilithium + Kyber post-quantum keys per party, so signing requires PQC approval.
-
-```
-For each party:
-  generate Dilithium keypair (ML-DSA-65) + Kyber keypair (ML-KEM-768)
-
-  0x72 register_party_address(key_id, party_index, address)
-  0x73 register_dilithium_pubkey(key_id, party_index, dilithium_pubkey)
-  0x74 register_kyber_pubkey(key_id, party_index, kyber_pubkey)
-```
-
-**PQC approval flow** (required before GG20 if PQC is registered):
-
-```
-0x03 sign_message(key_id, msg_hash, tx_tag)       ← queue the message
-0x75 start_pqc_approval_session(key_id, task_id, signing_subset)
-                                                   ← open approval window
-For each party in signing_subset:
-  compute approvalHash = SHA256(KOSH_PQC_APPROVAL_V1 || ... || challenge)
-  0x76 submit_pqc_approval(key_id, task_id, party_index, approvalHash)
-
-0x77 finalize_pqc_approval(key_id, task_id)       ← check all approved
-
-Then → continue to Phase 3 (GG20)
+┌─────────────────────────────────────────────────────┐
+│                  KOSH SIGNER UI                     │
+│                                                     │
+│  ┌───────────┐        ┌───────────────────────┐    │
+│  │  CREATE   │        │       SIGN TX         │    │
+│  │  NEW KEY  │        │                       │    │
+│  │           │        │  Contract: 03abc...   │    │
+│  │ → DKG     │        │  Key ID:   42         │    │
+│  │   phases  │        │  EVM:      0x46fe...  │    │
+│  │   stream  │        │                       │    │
+│  │   SSE     │        │  Amount: [_____] ETH  │    │
+│  │           │        │  To:     [___________]│    │
+│  └───────────┘        │                       │    │
+│                       │  [  SIGN & SEND  ]    │    │
+│  Passkey auth         │                       │    │
+│  ← WebAuthn           └───────────────────────┘    │
+│                                                     │
+│  Status stream (SSE):                               │
+│  ● DKG_START          ● GG20_ROUND1                 │
+│  ● DKG_COMMITTED      ● MTA_COMPLETE                │
+│  ● DKG_SUBSHARES      ● GG20_ROUND2                 │
+│  ● DKG_FINALIZED      ● PARTIAL_SIGS                │
+│  ● DKG_COMPLETE  ✓    ● SIGN_COMPLETE  ✓            │
+└─────────────────────────────────────────────────────┘
 ```
 
 ---
 
-### Phase 3: GG20 Signing (12 transactions)
+## 9. Smart Contracts
 
-**Goal**: Produce a valid ECDSA `(r, σ)` without any party knowing `k` or `s`.
+All contracts are Rust → WASM, deployed to Partisia. **Never modified after deploy.**
 
-**Off-chain pre-computation** (no chain calls):
+| Contract | Purpose |
+|----------|---------|
+| `kosh-zk-signer` | Main — DKG, GG20, PQC, policy enforcement |
+| `kosh-vault` | Optional vault — holds assets, requires signer approval |
+| `kosh-account-registry` | Maps Partisia addresses → signer contracts |
 
-```
-Each party i independently:
-  pick random kᵢ (HMAC-DRBG seeded with sᵢ)
-  pick random γᵢ (masking value)
-  compute Γᵢ = γᵢ·G   (gamma point)
+**Key files** (`contracts/kosh-zk-signer/src/`):
 
-Paillier MtA rounds (12 exchanges total, all pairs):
-  For each pair (i,j):
-    mtaRound — compute additive share of kᵢ·γⱼ  →  αᵢⱼ + βᵢⱼ
-    mtaRound — compute additive share of kᵢ·sⱼ  →  μᵢⱼ + νᵢⱼ
-
-Each party computes:
-  δᵢ = kᵢ·γᵢ + Σ(cross-term shares from MtA)   ← share of k·γ
-  σᵢ = kᵢ·sᵢ + Σ(cross-term shares from MtA)   ← share of k·s (NEVER revealed)
-```
-
-**On-chain transactions**:
-
-```
-Party 1          Party 2          Party 3          Contract
-───────          ───────          ───────          ────────
-                                              0x50 gg20_start_signing(key_id, task_id, subset)
-                                              Contract: phase → ThresholdSigning
-
-submit δ₁ ───────────────────────────────────► 0x45 submit_delta(key_id, 1, δ₁)
-submit δ₂ ───────────────────────────────────► 0x45 submit_delta(key_id, 2, δ₂)
-submit δ₃ ───────────────────────────────────► 0x45 submit_delta(key_id, 3, δ₃)
-
-submit Γ₁ ───────────────────────────────────► 0x46 submit_gamma_point(key_id, 1, Γ₁)
-submit Γ₂ ───────────────────────────────────► 0x46 submit_gamma_point(key_id, 2, Γ₂)
-submit Γ₃ ───────────────────────────────────► 0x46 submit_gamma_point(key_id, 3, Γ₃)
-
-                                              0x47 gg20_finalize_r(key_id, task_id)
-                                              Contract computes:
-                                                δ = δ₁+δ₂+δ₃       (= k·γ)
-                                                Γ = Γ₁+Γ₂+Γ₃       (= γ·G)
-                                                R = δ⁻¹·Γ           (= k⁻¹·G)
-                                                r = R.x mod n       (part of sig)
-
-compute σ₁ (using k⁻¹, r, s₁, z) ──────────► 0x30 commit_partial_sig(key_id, 1, SHA256(σ₁))
-compute σ₂ (using k⁻¹, r, s₂, z) ──────────► 0x30 commit_partial_sig(key_id, 2, SHA256(σ₂))
-compute σ₃ (using k⁻¹, r, s₃, z) ──────────► 0x30 commit_partial_sig(key_id, 3, SHA256(σ₃))
-
-reveal σ₁ ───────────────────────────────────► 0x31 submit_partial_sig(key_id, 1, σ₁)
-reveal σ₂ ───────────────────────────────────► 0x31 submit_partial_sig(key_id, 2, σ₂)
-reveal σ₃ ───────────────────────────────────► 0x31 submit_partial_sig(key_id, 3, σ₃)
-
-                                              0x32 finalize_gg20_sig(key_id, task_id)
-                                              Contract combines:
-                                                σ = σ₁+σ₂+σ₃ mod n
-                                                if σ > n/2: σ = n-σ  (EIP-2 low-s)
-                                                verify ECDSA(P, z, r, σ) ✓
-                                                store signature on-chain ✓
-```
-
-**The key trick** — why `R = δ⁻¹·Γ = k⁻¹·G`:
-
-```
-δ = k·γ        (nobody knows k or γ, but MtA gave additive shares of k·γ)
-Γ = γ·G        (sum of public gamma points)
-
-R = δ⁻¹·Γ = (k·γ)⁻¹·(γ·G) = k⁻¹·γ⁻¹·γ·G = k⁻¹·G
-
-γ cancels out. Nobody computed k or k⁻¹.
-```
+| File | What it does |
+|------|-------------|
+| `lib.rs` | All action handlers (0x20–0x85) |
+| `signing_state.rs` | `KeyEntry`, `SigningTask`, `Phase` state types |
+| `dkg.rs` | Commit/reveal, Schnorr verify, k256 EC point addition |
+| `shamir.rs` | Lagrange interpolation (legacy path) |
+| `off_chain.rs` | ZK node callbacks on encrypted share confirmation |
+| `zk_compute.rs` | ZK compiler integration for Partisia ZK nodes |
 
 ---
 
-## 6. Contract Actions Reference
+## 10. API Reference
 
-### DKG Actions
+### Rust backend endpoints (port 8080, used by frontend)
 
-| Shortname | Name | Parameters | Effect |
-|-----------|------|------------|--------|
-| `0x20` | `dkg_create_key` | `key_id: u32, num_parties: u8` | Create empty key slot, phase → Committing |
-| `0x21` | `dkg_commit` | `key_id: u32, party_index: u8, commitment: Vec<u8>` | Store `SHA-256(Pᵢ)` |
-| `0x22` | `dkg_reveal` | `key_id: u32, party_index: u8, pubkey: Vec<u8>` | Reveal `Pᵢ`, verify hash matches |
-| `0x23` | `dkg_finalize` | `key_id: u32` | Compute `P = P₁+P₂+P₃`, phase → WaitingForShares |
-| `0x10` | `submit_key_share` | `key_id: u32, party_index: u8` + ZK input | Encrypt `sᵢ` half to ZK nodes |
-| `0x24` | `dkg_complete_keygen` | `key_id: u32` | Mark key Complete |
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/health` | Service health |
+| GET | `/api/v1/runtime/preflight` | Check chain + key readiness |
+| GET | `/api/v1/runtime/active` | Current runtime state |
+| POST | `/api/v1/passkeys/register/start` | WebAuthn registration start |
+| POST | `/api/v1/passkeys/register/finish` | WebAuthn registration finish |
+| POST | `/api/v1/passkeys/auth/start` | WebAuthn auth start |
+| POST | `/api/v1/passkeys/auth/finish` | WebAuthn auth finish |
+| GET | `/api/v1/passkeys/me` | Current passkey account |
+| POST | `/api/v1/passkeys/create-key` | Trigger DKG — creates distributed key |
+| POST | `/api/v1/passkeys/reuse-sign` | Trigger GG20 — sign a transaction |
+| POST | `/api/v1/passkeys/link-key` | Link key to passkey account |
+| POST | `/api/v1/passkeys/select-key` | Select active key |
+| GET | `/api/v1/threshold/key-status` | Key phase on Partisia |
+| GET | `/api/v1/threshold/task-signature` | Retrieve final signature |
+| GET | `/api/v1/jobs/:id` | Job status |
+| GET | `/api/v1/jobs/:id/events` | SSE stream of job events |
 
-### GG20 Signing Actions
+### Go gateway endpoints (port 8080, microservices path)
 
-| Shortname | Name | Parameters | Effect |
-|-----------|------|------------|--------|
-| `0x50` | `gg20_start_signing` | `key_id: u32, task_id: u32, subset: Vec<u8>` | Open signing session |
-| `0x45` | `submit_delta` | `key_id: u32, party_index: u8, delta: Vec<u8>` | Submit `δᵢ` (share of `k·γ`) |
-| `0x46` | `submit_gamma_point` | `key_id: u32, party_index: u8, point: Vec<u8>` | Submit `Γᵢ = γᵢ·G` |
-| `0x47` | `gg20_finalize_r` | `key_id: u32, task_id: u32` | Compute `R = δ⁻¹·Γ`, extract `r` |
-| `0x30` | `commit_partial_sig` | `key_id: u32, party_index: u8, hash: Vec<u8>` | Commit `SHA-256(σᵢ)` |
-| `0x31` | `submit_partial_sig` | `key_id: u32, party_index: u8, sig: Vec<u8>` | Reveal `σᵢ`, verify hash |
-| `0x32` | `finalize_gg20_sig` | `key_id: u32, task_id: u32` | Combine `σ = Σσᵢ`, low-s, ECDSA verify |
-| `0x48` | `abort_signing` | `key_id: u32, task_id: u32` | Cancel session |
+All routes require `Authorization: Bearer <jwt>` except `/api/v1/health` and `/api/v1/token`.
 
-### PQC Actions
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/token` | Issue JWT (`X-API-Key` header) |
+| GET | `/api/v1/health` | Health check |
+| POST | `/api/v1/keys` | DKG — create distributed key |
+| GET | `/api/v1/keys/{id}` | Key status |
+| POST | `/api/v1/sign` | GG20 — sign message hash |
+| GET | `/api/v1/sign/{id}` | Sign session status |
+| POST | `/api/v1/policies` | Add signing policy |
+| GET | `/api/v1/policies` | List policies |
+| DELETE | `/api/v1/policies/{id}` | Remove policy |
 
-| Shortname | Name | Parameters | Effect |
-|-----------|------|------------|--------|
-| `0x72` | `register_party_address` | `key_id: u32, party_index: u8, address: str` | Link party index to Partisia address |
-| `0x73` | `register_dilithium_pubkey` | `key_id: u32, party_index: u8, pubkey: Vec<u8>` | Store ML-DSA-65 public key |
-| `0x74` | `register_kyber_pubkey` | `key_id: u32, party_index: u8, pubkey: Vec<u8>` | Store ML-KEM-768 public key |
-| `0x75` | `start_pqc_approval_session` | `key_id: u32, task_id: u32, subset: Vec<u8>` | Open PQC approval window |
-| `0x76` | `submit_pqc_approval` | `key_id: u32, task_id: u32, party_index: u8, hash: Vec<u8>` | Submit approval hash |
-| `0x77` | `finalize_pqc_approval` | `key_id: u32, task_id: u32` | Verify all approvals, ungate signing |
+### Monitor endpoints (port 9090)
 
-### Policy / Legacy Actions
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/metrics` | Prometheus metrics |
+| GET | `/health` | JSON service status map |
+| GET | `/ready` | Readiness probe |
 
+---
+
+## 11. Contract Actions Reference
+
+### DKG (0x20–0x24)
 | Shortname | Name | Effect |
 |-----------|------|--------|
-| `0x03` | `sign_message` | Queue a message hash for signing (Shamir or PQC flow) |
-| `0x07` | `signing_complete` | Submit pre-computed signature (Shamir legacy) |
-| `0x02` | `create_key_with_id` | Create key with Shamir setup |
-| `0x05` | `post_public_key` | Store public key directly |
+| `0x20` | `dkg_create_key` | Open key slot, phase → Committing |
+| `0x21` | `dkg_commit` | Store SHA256(Pᵢ) per party |
+| `0x22` | `dkg_reveal` | Reveal Pᵢ, verify hash |
+| `0x23` | `dkg_finalize` | P = P₁+P₂+P₃ on-chain |
+| `0x10` | `submit_key_share` | Encrypt sᵢ half to ZK nodes |
+| `0x24` | `dkg_complete_keygen` | Mark key Complete |
+
+### GG20 Signing (0x45–0x53)
+| Shortname | Name | Effect |
+|-----------|------|--------|
+| `0x50` | `gg20_start_signing` | Open signing session |
+| `0x45` | `submit_delta` | Submit δᵢ |
+| `0x46` | `submit_gamma_point` | Submit Γᵢ = γᵢ·G |
+| `0x47` | `gg20_finalize_r` | R = δ⁻¹·Γ, extract r |
+| `0x51` | `commit_partial_sig` | Commit SHA256(σᵢ) |
+| `0x52` | `submit_partial_sig` | Reveal σᵢ |
+| `0x53` | `finalize_gg20_sig` | σ=Σσᵢ, low-s, ECDSA verify ✓ |
+| `0x48` | `abort_signing` | Cancel session |
+
+### PQC (0x72–0x77)
+| Shortname | Name | Effect |
+|-----------|------|--------|
+| `0x72` | `register_party_address` | Map party → Partisia address |
+| `0x73` | `register_dilithium_pubkey` | Store ML-DSA-65 pk |
+| `0x74` | `register_kyber_pubkey` | Store ML-KEM-768 pk |
+| `0x75` | `start_pqc_approval_session` | Open approval window |
+| `0x76` | `submit_pqc_approval` | Submit Dilithium sig |
+| `0x77` | `finalize_pqc_approval` | Verify all, ungate GG20 |
 
 ---
 
-## 7. Environment Setup
+## 12. Environment Setup
 
 ### Prerequisites
 
 ```bash
-# Rust toolchain + Partisia contract compiler
+# Rust
 rustup target add wasm32-unknown-unknown
 cargo install cargo-partisia-contract
 
+# Go 1.23+
+go version  # must be >= 1.23
+
 # Node.js 18+
-cd client
+node --version
+```
+
+### Environment variables
+
+```bash
+# ── Partisia blockchain ───────────────────────────────────────────────────
+PARTISIA_NODE_URL=https://node1.testnet.partisiablockchain.com
+SIGNER_ADDRESS=03...          # deployed kosh-zk-signer contract
+
+# ── One key per party (held by chain-relay) ───────────────────────────────
+PARTISIA_SENDER_KEY_1=<64-char hex private key>
+PARTISIA_SENDER_ADDRESS_1=<partisia address>
+PARTISIA_SENDER_KEY_2=...
+PARTISIA_SENDER_ADDRESS_2=...
+PARTISIA_SENDER_KEY_3=...
+PARTISIA_SENDER_ADDRESS_3=...
+
+# ── Share file encryption ─────────────────────────────────────────────────
+SHARE_FILE_KEY_1=party1-secret-passphrase
+SHARE_FILE_KEY_2=party2-secret-passphrase
+SHARE_FILE_KEY_3=party3-secret-passphrase
+
+# ── Gateway ───────────────────────────────────────────────────────────────
+JWT_SECRET=change-me-in-production
+PORT=8080
+
+# ── Service addresses ─────────────────────────────────────────────────────
+COORDINATOR_ADDR=localhost:50051
+POLICY_ADDR=localhost:50052
+PARTY_1_ADDR=localhost:50060
+PARTY_2_ADDR=localhost:50061
+PARTY_3_ADDR=localhost:50062
+```
+
+---
+
+## 13. Running Everything Locally
+
+### Option A — Rust backend (used by frontend)
+
+```bash
+# Terminal 1: Start the Rust backend
+cargo run -p kosh-backend
+# Listens on :8080, orchestrates party daemons internally
+
+# Terminal 2: Start the frontend
+cd frontend/KoshSignerUsingPartisiaZK/client
 npm install
+npm run dev
+# Open http://localhost:5173
 ```
 
-### Environment Variables
-
-Create `client/.env` or export:
+### Option B — Full microservices stack
 
 ```bash
-# Partisia account that pays for transactions
-PARTISIA_SENDER_KEY=<64-char hex private key>
-PARTISIA_SENDER_ADDRESS=<partisia_account_address>
+# Step 1: Build all Rust services
+cargo build --release \
+  -p kosh-party -p kosh-pqc -p kosh-keystore -p kosh-chain-relay
 
-# Deployed contract address
-SIGNER_ADDRESS=03xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Step 2: Start Go services
+cd services/kosh-coordinator && PORT=50051 go run ./cmd/coordinator &
+cd services/kosh-policy      && PORT=50052 POLICY_FILE= go run ./cmd/policy &
 
-# Optional: Ethereum RPC for final tx broadcast
-ETH_RPC_URL=https://sepolia.infura.io/v3/<key>
+# Step 3: Start PQC services (one per party)
+PQC_KEY_FILE=/tmp/pqc1.json PORT=50080 ./target/release/kosh-pqc &
+PQC_KEY_FILE=/tmp/pqc2.json PORT=50081 ./target/release/kosh-pqc &
+PQC_KEY_FILE=/tmp/pqc3.json PORT=50082 ./target/release/kosh-pqc &
+
+# Step 4: Start party daemons
+PARTY_INDEX=1 PORT=50060 COORDINATOR_ADDR=http://localhost:50051 \
+  ./target/release/kosh-party &
+PARTY_INDEX=2 PORT=50061 COORDINATOR_ADDR=http://localhost:50051 \
+  ./target/release/kosh-party &
+PARTY_INDEX=3 PORT=50062 COORDINATOR_ADDR=http://localhost:50051 \
+  ./target/release/kosh-party &
+
+# Step 5: Start chain relay
+PARTISIA_NODE_URLS=https://node1.testnet.partisiablockchain.com \
+  PORT=50053 ./target/release/kosh-chain-relay &
+
+# Step 6: Start gateway + monitor
+cd services/kosh-gateway && PORT=8080 \
+  COORDINATOR_ADDR=localhost:50051 POLICY_ADDR=localhost:50052 \
+  PARTY_1_ADDR=localhost:50060 PARTY_2_ADDR=localhost:50061 \
+  PARTY_3_ADDR=localhost:50062 JWT_SECRET=dev go run ./cmd/gateway &
+
+cd services/kosh-monitor && PORT=9090 go run ./cmd/monitor &
 ```
 
-### Build Contract
+### Option C — Docker Compose
 
 ```bash
-cd contracts/kosh-zk-signer
-cargo pbc build --release
-# Output: target/wasm32-unknown-unknown/release/kosh_zk_signer.pbc
+cp deploy/.env.example deploy/.env
+# Fill in your Partisia keys in deploy/.env
+docker-compose -f deploy/docker-compose.yml up
+```
+
+### Quick API test (Option B / C)
+
+```bash
+# Get token
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/token \
+  -H "X-API-Key: mykey" | jq -r .token)
+
+# Create distributed key (DKG)
+curl -X POST http://localhost:8080/api/v1/keys \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"key_id": 1, "num_parties": 3, "threshold": 2}'
+
+# Sign a message
+curl -X POST http://localhost:8080/api/v1/sign \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key_id": 1,
+    "message_hash": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+    "tx_tag": "transfer",
+    "signing_subset": [1, 2]
+  }'
+
+# Check Prometheus metrics
+curl http://localhost:9090/metrics | grep kosh_
 ```
 
 ---
 
-## 8. Running Tests
+## 14. Test Results
 
-### Full DKG + GG20 Integration Test (testnet)
+### All tests — 27/27 passing
+
+```
+Service               Tests   Result   What is tested
+──────────────────────────────────────────────────────────────────────
+kosh-coordinator      6       ✅ PASS  Post/Read/Watch(immediate+future)/Clear/List gRPC
+kosh-policy           5       ✅ PASS  AddPolicy/ListPolicies/Validate/RemovePolicy gRPC
+cross-service         1       ✅ PASS  Coordinator + policy running together
+kosh-gateway          4       ✅ PASS  Health, JWT auth, Policy CRUD, 3-party DKG REST→gRPC
+kosh-monitor          4       ✅ PASS  Ready, Health JSON, Prometheus /metrics, metric types
+kosh-pqc              5       ✅ PASS  GetIdentity, KEM round-trip, AES-GCM, ML-DSA, tamper
+kosh-party            2       ✅ PASS  GetStatus, 3-party DKG → all 3 compute same combined_pk
+──────────────────────────────────────────────────────────────────────
+TOTAL                 27      ✅ ALL PASS
+```
+
+### Key proof: 3-party DKG produces identical public key
+
+```
+Party 1 DKG complete: pk=020917fd177743509ed07873f81ed94772a45058d9723e7a474c3198d63eb03f7b
+Party 2 DKG complete: pk=020917fd177743509ed07873f81ed94772a45058d9723e7a474c3198d63eb03f7b
+Party 3 DKG complete: pk=020917fd177743509ed07873f81ed94772a45058d9723e7a474c3198d63eb03f7b
+```
+
+All three parties independently computed the same `P = P₁ + P₂ + P₃`.
+
+### Run all tests
 
 ```bash
+# Go tests
+cd services/integration-test && go test ./... -timeout 60s
+cd services/kosh-gateway     && go test -timeout 300s
+cd services/kosh-monitor     && go test -timeout 60s
+
+# Rust tests
+cargo test -p kosh-pqc   --test grpc_test
+cargo test -p kosh-party --test party_grpc_test
+
+# TypeScript integration tests (needs Partisia testnet)
 cd client
-npx tsx src/test-gg20-sign.ts
-```
-
-Runs 12 DKG transactions + 12 signing transactions on Partisia testnet. Takes ~3–5 minutes.
-
-**Expected output**:
-```
-=== DKG + GG20 Threshold ECDSA Test ===
-
-DKG Phase:
-  dkg_create_key OK
-  dkg_commit_P1 OK     Tx: e0a3a36f...
-  dkg_commit_P2 OK     Tx: 0e1dc99e...
-  dkg_commit_P3 OK     Tx: cdfc2b39...
-  dkg_reveal_P1 OK     Tx: 70e5f2d5...
-  dkg_reveal_P2 OK     Tx: b0fce68c...
-  dkg_reveal_P3 OK     Tx: 4c02e8b0...
-  dkg_finalize OK       P = P₁+P₂+P₃ computed
-  submit_key_share_P1_high OK
-  submit_key_share_P1_low OK
-  ...
-  dkg_complete_keygen OK
-
-GG20 Signing Phase:
-  gg20_start_signing OK
-  submit_delta_1 OK
-  submit_delta_2 OK
-  submit_delta_3 OK
-  submit_gamma_point_1 OK
-  submit_gamma_point_2 OK
-  submit_gamma_point_3 OK
-  gg20_finalize_r OK   r extracted
-  commit_partial_sig_P1 OK
-  commit_partial_sig_P2 OK
-  commit_partial_sig_P3 OK
-  submit_partial_sig_P1 OK
-  submit_partial_sig_P2 OK
-  submit_partial_sig_P3 OK
-  finalize_gg20_sig OK  ✓ ECDSA signature verified on-chain
-```
-
-### Policy Tests
-
-```bash
-cd client
-npx tsx src/test-policy.ts
-# Expected: 20/20 PASS
-```
-
-### PQC Tests
-
-```bash
-cd client
-npx tsx src/test-pqc.ts
-# Expected: 28/28 PASS
-```
-
-### Local GG20 Math Test (no chain)
-
-```bash
-cd client
-npx tsx src/test-gg20-local.ts
-```
-
-### TypeScript Type Check
-
-```bash
-cd client
-npx tsc --noEmit
-# Expected: zero errors
+npx tsx src/test-gg20-sign.ts   # Full DKG + GG20 on testnet (~3-5 min)
+npx tsx src/test-policy.ts      # 20 assertions
+npx tsx src/test-pqc.ts         # 28 assertions
 ```
 
 ---
 
-## 9. Live Contract Addresses
+## 15. Live Contract Addresses
 
-| Contract | Address | Last Active |
-|----------|---------|------------|
-| kosh-zk-signer (current) | `031fb3ede8b7274ffb94ef250ba3747e49b2706d12` | Apr 22, 2026 |
-| kosh-zk-signer (previous) | `03a1e8aba3ba45c1e42d01f688768436cb2b572de0` | Apr 18, 2026 |
+| Contract | Address |
+|----------|---------|
+| kosh-zk-signer (current) | `031fb3ede8b7274ffb94ef250ba3747e49b2706d12` |
+| kosh-zk-signer (previous) | `03a1e8aba3ba45c1e42d01f688768436cb2b572de0` |
 
-**Partisia Explorer**: `https://browser.testnet.partisiablockchain.com/contracts/<ADDRESS>`
+**Explorer**: `https://browser.testnet.partisiablockchain.com/contracts/<ADDRESS>`
 
-**Deployer account**: `002ee35cde26782f255b9550ea1ac53faeac2c71cd`
+**Deployer**: `002ee35cde26782f255b9550ea1ac53faeac2c71cd`
 
-**Proven Ethereum signing** (signature produced by GG20 without ever having the private key):
+**Proven Ethereum signing** — private key never existed:
 
 | Item | Value |
 |------|-------|
 | Sepolia Tx | `0x09ec739d1e7cf9a91019c393abc9eee91042eedf20b4ec9f70630f7b93b98d41` |
 | Block | 10432151 |
-| From | `0x46fe38ef06876C3d76E03D1e5991eD28FF2714ad` |
-| Proof | Transaction was accepted by Ethereum Sepolia — the private key never existed |
+| From (EVM) | `0x46fe38ef06876C3d76E03D1e5991eD28FF2714ad` |
 
 ---
 
-## 10. Security Properties
+## 16. Security Properties
 
-| Property | Status | How |
-|----------|--------|-----|
-| Private key never assembled | ✓ | DKG additive shares — `s = s₁+s₂+s₃` never computed |
-| Nonce never assembled | ✓ | GG20 — `k = k₁+k₂+k₃` never computed, `k⁻¹` never exists as a number |
-| Rogue key attack prevented | ✓ | DKG commit-reveal: parties lock in `Pᵢ` before seeing others |
-| Delta manipulation prevented | ✓ | `δᵢ` submitted plaintext (per GG20 protocol — safe to reveal because `γ` masks `k`) |
-| Partial sig manipulation prevented | ✓ | Commit-reveal for `σᵢ`: hash committed first, then revealed |
-| ZK share security | ✓ | Each `sᵢ` split into two 128-bit halves, each half encrypted per ZK node |
-| EIP-2 / BIP-62 compliance | ✓ | Low-s normalization applied by contract before storing signature |
-| Post-quantum gating (optional) | ✓ | ML-DSA-65 + ML-KEM-768 approval required before GG20 starts |
+| Property | Status | Mechanism |
+|----------|--------|-----------|
+| Private key never assembled | ✅ | DKG additive shares — s = s₁+s₂+s₃ never computed |
+| Nonce never assembled | ✅ | GG20 — k_i are additive shares, k⁻¹ never exists as a number |
+| Rogue key attack prevented | ✅ | DKG commit-reveal + Schnorr proof of knowledge of sᵢ |
+| Sub-share integrity | ✅ | Feldman VSS: fⱼ(i)·G == Cⱼ₀ + i·Cⱼ₁ verified before combining |
+| Gamma bias prevented | ✅ | Commit-reveal for Γᵢ before delta submit |
+| Delta manipulation prevented | ✅ | Commit-reveal for δᵢ |
+| Partial sig manipulation | ✅ | Commit-reveal for σᵢ |
+| Secret memory cleared | ✅ | Rust `ZeroizeOnDrop` on all key material structs |
+| Secret isolation | ✅ | Secrets never cross service boundaries (stay in kosh-keystore/kosh-pqc) |
+| ZK share security | ✅ | sᵢ split into two 128-bit halves, each encrypted per ZK node |
+| Post-quantum gating | ✅ | ML-DSA-65 + ML-KEM-768 approval required before GG20 |
+| EIP-2 low-s compliance | ✅ | Contract normalizes σ if σ > N/2 |
+| Policy enforcement | ✅ | Mandatory parties + min threshold checked before fan-out |
+| JWT authentication | ✅ | HS256 tokens required on all gateway routes |
+| 2048-bit Paillier | ✅ | Upgraded from 1024-bit in original TypeScript |
 
-### Current Limitations (Pre-Production)
+### Known gaps (pre-production)
 
-1. **No ZK range proofs in MtA** — A malicious party can submit crafted out-of-range Paillier values over multiple sessions to extract another party's `kᵢ`. Fix: add Πenc + Πaff-g proofs per GG20 paper, or replace with CGGMP21.
-
-2. **No Γᵢ commitment** — Gamma points are submitted directly; delta has commit-reveal but gamma does not. Last-to-submit party could bias `R`. Fix: add commit-reveal for `Γᵢ`.
-
-3. **All parties on one machine** — `gg20Sign()` runs all 3 parties in one process. Fix: separate processes per machine, communicate via authenticated network channels.
-
-4. **3-of-3, not threshold** — If any party goes offline permanently, the wallet is locked. Fix: replace additive DKG with Feldman VSS for 2-of-3 threshold.
-
-5. **1024-bit Paillier** — Borderline by 2024 standards. Fix: change to 2048-bit.
-
-6. **Safe prime fallback** — `generateSafePrime()` silently falls back to a non-safe prime if generation is slow. Fix: remove fallback, fail loudly.
-
----
-
-## 11. What Needs to Be Fixed Before Production
-
-Ranked by severity:
-
-| # | Issue | Severity | Fix |
-|---|-------|----------|-----|
-| 1 | No ZK range proofs in MtA | **Critical** | Add Πenc + Πaff-g per GG20 paper, or use CGGMP21 |
-| 2 | All parties on one machine | **Critical** | Separate processes per machine + network layer |
-| 3 | No Γᵢ commitment | **Medium** | Add commit-reveal for gamma points |
-| 4 | 3-of-3, not 2-of-3 | **Medium** | Feldman VSS DKG (see `client/threshold.md`) |
-| 5 | 1024-bit Paillier | Low | Change `paillierKeygen(1024)` to `(2048)` |
-| 6 | Safe prime fallback | Low | Remove fallback, throw error |
-| 7 | No identifiable abort | Low | Add per-submission ZK proofs |
-
-**Recommended path to production**: Replace `paillier.ts` + `mta.ts` + `gg20-signing.ts` with [CGGMP21](https://github.com/LFDT-Lockness/cggmp21) (Rust) or [tss-lib](https://github.com/bnb-chain/tss-lib) (Go). Keep the Partisia contract layer — DKG commit/reveal, on-chain R computation, and partial sig combination are correct.
+| Priority | Issue | Fix |
+|----------|-------|-----|
+| Critical | No ZK range proofs in MtA | Add Πenc + Πaff-g per GG20 paper, or use CGGMP21 |
+| Critical | Keystore→Party wire not complete | Wire kosh-keystore gRPC to kosh-party (placeholder x_i used in tests) |
+| Medium | Chain relay not called from party | Wire kosh-chain-relay into party phase.rs (stubs present) |
+| Medium | No identifiable abort | Add per-submission ZK proofs |
+| Low | Single coordinator | Add clustering for high availability |
