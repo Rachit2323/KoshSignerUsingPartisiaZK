@@ -1,1 +1,8 @@
-error: invalid toolchain: the path '/Users/rachitsharma/.rustup/toolchains/nightly-aarch64-apple-darwin' has no bin/ directory
+error: failed to load manifest for workspace member `/Users/rachitsharma/Desktop/wasserstoff/KoshSignerUsingPartisiaZK/services/kosh-party`
+referenced by workspace at `/Users/rachitsharma/Desktop/wasserstoff/KoshSignerUsingPartisiaZK/Cargo.toml`
+
+Caused by:
+  failed to read `/Users/rachitsharma/Desktop/wasserstoff/KoshSignerUsingPartisiaZK/services/kosh-party/Cargo.toml`
+
+Caused by:
+  No such file or directory (os error 2)

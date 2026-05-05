@@ -8,6 +8,7 @@ members = [
     "services/kosh-pqc",
     "services/kosh-chain-relay",
     "services/kosh-keystore",
+    "services/kosh-party",
 ]
 resolver = "2"
 

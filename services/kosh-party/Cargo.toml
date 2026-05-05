@@ -1,33 +1,38 @@
 [package]
-name = "kosh-pqc"
+name = "kosh-party"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "kosh-pqc"
+name = "kosh-party"
 path = "src/main.rs"
 
 [dependencies]
 tokio        = { version = "1", features = ["full"] }
 tonic        = "0.11"
 prost        = "0.12"
-ml-kem       = { version = "0.3", features = ["getrandom"] }
-ml-dsa       = { version = "0.1.0-rc.9", features = ["rand_core", "zeroize"] }
-aes-gcm      = "0.10"
+futures      = "0.3"
+k256         = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 sha2         = "0.10"
-rand         = "0.8"
+hmac         = "0.12"
 serde        = { version = "1", features = ["derive"] }
 serde_json   = "1"
-base64       = { version = "0.22", features = ["std"] }
 hex          = "0.4"
+base64       = { version = "0.22", features = ["std"] }
 anyhow       = "1"
 zeroize      = { version = "1", features = ["derive"] }
+num-bigint   = { version = "0.4", features = ["rand"] }
+num-traits   = "0.2"
+num-integer  = "0.1"
+rand         = "0.8"
+uuid         = { version = "1", features = ["v4"] }
 tracing      = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio-stream = "0.1"
 
 [[test]]
-name = "grpc_test"
-path = "tests/grpc_test.rs"
+name = "party_grpc_test"
+path = "tests/party_grpc_test.rs"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -36,4 +41,3 @@ prost = "0.12"
 
 [build-dependencies]
 tonic-build = "0.11"
-getrandom    = { version = "0.4", features = ["std"] }

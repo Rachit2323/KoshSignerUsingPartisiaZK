@@ -4,8 +4,7 @@ use aes_gcm::{
 };
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ml_dsa::signature::{Signer, Verifier};
-use ml_kem::{Decapsulate, Encapsulate};
+use ml_dsa::{signature::Verifier, EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
@@ -16,6 +15,20 @@ use crate::pb::*;
 
 pub struct PqcServiceImpl {
     pub identity: Arc<Identity>,
+}
+
+fn aes_key(shared_secret: &[u8]) -> [u8; 32] {
+    Sha256::digest(shared_secret).into()
+}
+
+fn random_nonce() -> [u8; 12] {
+    use std::io::Read;
+    let mut n = [0u8; 12];
+    std::fs::File::open("/dev/urandom")
+        .unwrap()
+        .read_exact(&mut n)
+        .unwrap();
+    n
 }
 
 #[tonic::async_trait]
@@ -35,19 +48,13 @@ impl PqcService for PqcServiceImpl {
         &self,
         req: Request<EncapsulateRequest>,
     ) -> Result<Response<EncapsulateResponse>, Status> {
-        use ml_kem::kem::EncapsulationKey;
-        use ml_kem::EncodedSizeUser;
-
-        let pk_bytes = B64
-            .decode(&req.into_inner().recipient_kyber_pk_b64)
+        let (ct, ss) = self
+            .identity
+            .encapsulate_to(&req.into_inner().recipient_kyber_pk_b64)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let ek = EncapsulationKey::<ml_kem::MlKem768Params>::from_bytes(pk_bytes.as_slice().into());
-        let (ct, ss) = ek.encapsulate();
-
         Ok(Response::new(EncapsulateResponse {
-            ciphertext_b64: B64.encode(ct.as_ref()),
-            shared_secret_b64: B64.encode(ss.as_ref()),
+            ciphertext_b64: B64.encode(&ct),
+            shared_secret_b64: B64.encode(&ss),
         }))
     }
 
@@ -55,20 +62,15 @@ impl PqcService for PqcServiceImpl {
         &self,
         req: Request<DecapsulateRequest>,
     ) -> Result<Response<DecapsulateResponse>, Status> {
-        use ml_kem::kem::Ciphertext;
-
         let ct_bytes = B64
             .decode(&req.into_inner().ciphertext_b64)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        let ct = Ciphertext::<ml_kem::MlKem768Params>::from(
-            <[u8; 1088]>::try_from(ct_bytes.as_slice())
-                .map_err(|_| Status::invalid_argument("invalid ciphertext length"))?,
-        );
-        let ss = self.identity.kem_dk.decapsulate(&ct);
-
+        let ss = self
+            .identity
+            .decapsulate_ct(&ct_bytes)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
         Ok(Response::new(DecapsulateResponse {
-            shared_secret_b64: B64.encode(ss.as_ref()),
+            shared_secret_b64: B64.encode(&ss),
         }))
     }
 
@@ -81,15 +83,9 @@ impl PqcService for PqcServiceImpl {
             .decode(&r.shared_secret_b64)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let key_bytes = Sha256::digest(&ss);
+        let key_bytes = aes_key(&ss);
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-
-        let mut nonce_bytes = [0u8; 12];
-        std::io::Read::read_exact(
-            &mut std::fs::File::open("/dev/urandom").unwrap(),
-            &mut nonce_bytes,
-        )
-        .unwrap();
+        let nonce_bytes = random_nonce();
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -97,7 +93,6 @@ impl PqcService for PqcServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         let (ct, tag) = ciphertext.split_at(ciphertext.len() - 16);
-
         Ok(Response::new(EncryptPayloadResponse {
             ciphertext: ct.to_vec(),
             nonce: nonce_bytes.to_vec(),
@@ -114,7 +109,7 @@ impl PqcService for PqcServiceImpl {
             .decode(&r.shared_secret_b64)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let key_bytes = Sha256::digest(&ss);
+        let key_bytes = aes_key(&ss);
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
         let nonce = Nonce::from_slice(&r.nonce);
 
@@ -129,9 +124,12 @@ impl PqcService for PqcServiceImpl {
     }
 
     async fn sign(&self, req: Request<SignRequest>) -> Result<Response<SignResponse>, Status> {
-        let sig = self.identity.dsa_sk.sign(&req.into_inner().message);
+        use ml_dsa::signature::Signer;
+        let sig: Signature<MlDsa65> = self.identity.dsa_sk.sign(&req.into_inner().message);
+        let encoded = sig.encode();
+        let sig_bytes: &[u8] = encoded.as_ref();
         Ok(Response::new(SignResponse {
-            signature: sig.encode().to_vec(),
+            signature: sig_bytes.to_vec(),
         }))
     }
 
@@ -140,24 +138,21 @@ impl PqcService for PqcServiceImpl {
         req: Request<VerifyRequest>,
     ) -> Result<Response<VerifyResponse>, Status> {
         let r = req.into_inner();
+
         let pk_bytes = B64
             .decode(&r.dilithium_pk_b64)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-        use ml_dsa::VerifyingKey;
-        let arr: &ml_dsa::EncodedVerifyingKey<ml_dsa::MlDsa65Params> = pk_bytes
+        let vk_enc: &EncodedVerifyingKey<MlDsa65> = pk_bytes
             .as_slice()
             .try_into()
             .map_err(|_| Status::invalid_argument("invalid dilithium pk length"))?;
-        let vk = VerifyingKey::<ml_dsa::MlDsa65Params>::decode(arr);
+        let vk = VerifyingKey::<MlDsa65>::decode(vk_enc);
 
-        use ml_dsa::EncodedSignature;
-        let sig_bytes = r.signature;
-        let sig_arr: &EncodedSignature<ml_dsa::MlDsa65Params> = sig_bytes
+        let sig: Signature<MlDsa65> = r
+            .signature
             .as_slice()
             .try_into()
             .map_err(|_| Status::invalid_argument("invalid signature length"))?;
-        let sig = ml_dsa::Signature::<ml_dsa::MlDsa65Params>::decode(sig_arr);
 
         let valid = vk.verify(&r.message, &sig).is_ok();
         Ok(Response::new(VerifyResponse { valid }))
