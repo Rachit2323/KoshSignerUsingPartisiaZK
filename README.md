@@ -588,13 +588,8 @@ SSE live phase stream (while signing):
 ### Running the frontend
 
 ```bash
-# Terminal 1: Rust backend (required)
-cargo run -p kosh-backend
-# → listening on http://127.0.0.1:8080
-# → CORS: allows localhost:5173 by default
-
-# Terminal 2: Frontend dev server
-cd frontend/KoshSignerUsingPartisiaZK/client
+# Current app entrypoint
+cd frontend
 npm install
 npm run dev
 # → http://localhost:5173
@@ -604,7 +599,8 @@ npm run build
 # → dist/ (serve with any static host)
 ```
 
-Frontend connects to backend at `http://127.0.0.1:8080` (configurable in the UI).
+Frontend auto-recovers between `http://localhost:8080` and
+`http://127.0.0.1:8080` and displays runtime/job state directly in the UI.
 
 ---
 
@@ -739,44 +735,38 @@ node --version
 ### Environment variables
 
 ```bash
-# Partisia network
-PARTISIA_NODE_URL=https://node1.testnet.partisiablockchain.com
-SIGNER_ADDRESS=03...            # deployed kosh-zk-signer address
+# Current signer used by the frontend/runtime
+SIGNER_ADDRESS=031fb3ede8b7274ffb94ef250ba3747e49b2706d12
 
-# One Partisia key per party (chain-relay holds all)
-PARTISIA_SENDER_KEY_1=<64-char hex>
-PARTISIA_SENDER_ADDRESS_1=<address>
-PARTISIA_SENDER_KEY_2=...
-PARTISIA_SENDER_ADDRESS_2=...
-PARTISIA_SENDER_KEY_3=...
-PARTISIA_SENDER_ADDRESS_3=...
+# One funded Partisia key is reused for now across all 3 parties.
+# run-local.sh derives the real sender address from the key automatically.
+PARTISIA_SENDER_KEY="$(cat partisia-testnet-sender-20260428.pk)"
 
-# Share file encryption (one passphrase per party)
-SHARE_FILE_KEY_1=party1-secret-passphrase
-SHARE_FILE_KEY_2=party2-secret-passphrase
-SHARE_FILE_KEY_3=party3-secret-passphrase
-
-# Frontend ↔ backend connection
-# Backend CORS default: http://localhost:5173,http://127.0.0.1:5173
-KOSH_CORS_ALLOWED_ORIGINS=http://localhost:5173  # override if needed
-
-# Gateway JWT
-JWT_SECRET=change-me-in-production
+# 64 hex chars. Reuse the same value across restarts if you want local
+# persisted share/runtime state to remain usable.
+KEYSTORE_MASTER_KEY="$(openssl rand -hex 32)"
 ```
 
-### Option A — Rust backend + frontend (simplest, works today)
+### Current local stack (recommended)
 
 ```bash
-# Terminal 1: backend
-cargo run -p kosh-backend
-
-# Terminal 2: frontend
-cd frontend/KoshSignerUsingPartisiaZK/client
-npm install && npm run dev
+export SIGNER_ADDRESS=031fb3ede8b7274ffb94ef250ba3747e49b2706d12
+export PARTISIA_SENDER_KEY="$(cat partisia-testnet-sender-20260428.pk)"
+export KEYSTORE_MASTER_KEY="$(openssl rand -hex 32)"
+bash run-local.sh
 # Open http://localhost:5173
 ```
 
-### Option B — Full microservices stack
+Notes:
+- `run-local.sh` derives the effective Partisia sender address from
+  `PARTISIA_SENDER_KEY`; do not set `PARTISIA_SENDER_ADDRESS` manually unless it
+  matches the key exactly.
+- The relay serializes submissions per sender account to avoid nonce collisions
+  when one funded key is reused across parties.
+- Each of the 3 parties still persists a distinct threshold share under
+  `.kosh-shares/runtime-contract-<contract>-key-<id>-party-<idx>.json`.
+
+### Full microservices stack
 
 ```bash
 # Build all Rust services
@@ -911,7 +901,21 @@ npx tsc --noEmit                 # type check → 0 errors
 | Contract (current) | `031fb3ede8b7274ffb94ef250ba3747e49b2706d12` |
 | Contract (previous) | `03a1e8aba3ba45c1e42d01f688768436cb2b572de0` |
 | Deployer | `002ee35cde26782f255b9550ea1ac53faeac2c71cd` |
+| Shared sender key currently available in repo | `0070df8630bd853487c025e6e2b0eac733aa79481d` |
 | Explorer | `https://browser.testnet.partisiablockchain.com/contracts/<ADDR>` |
+
+### Important owner note
+
+The currently published signer `031fb3ede8b7274ffb94ef250ba3747e49b2706d12`
+is owned by `00c64bd3ad942e3efc3d4f3a6b7000ff88b595a180`. The shared sender key
+currently available in this repo resolves to `0070df8630bd853487c025e6e2b0eac733aa79481d`.
+
+That means:
+- `Create New Key` on the current signer is expected to fail unless the sender
+  key matches the owner, because `dkg_create_key (0x20)` is owner-only.
+- To make `Create New Key` succeed end-to-end, either use the owner private key
+  for the current signer or deploy a new signer owned by `0070df...` and point
+  the app to that new contract.
 
 **Sepolia proof — signature produced by threshold MPC, private key never assembled:**
 
