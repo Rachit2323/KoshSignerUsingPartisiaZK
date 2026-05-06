@@ -3,7 +3,8 @@
 /// → finalize → submit on-chain via ChainRelay.
 
 use anyhow::Result;
-use k256::{elliptic_curve::ff::PrimeField, ProjectivePoint, Scalar};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use k256::{elliptic_curve::ff::PrimeField, EncodedPoint, FieldBytes, ProjectivePoint, Scalar};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -31,12 +32,15 @@ pub fn schnorr_prove(
     party_index: u32,
 ) -> (ProjectivePoint, Scalar) {
     use k256::elliptic_curve::Field;
-    let r = Scalar::generate_vartime(&mut rand::rngs::OsRng);
-    let big_r = ProjectivePoint::GENERATOR * r;
+    loop {
+        let r = Scalar::generate_vartime(&mut rand::rngs::OsRng);
+        let big_r = ProjectivePoint::GENERATOR * r;
 
-    let e = schnorr_challenge(c_i0, &big_r, party_index);
-    let z = r + e * s_i;
-    (big_r, z)
+        if let Some(e) = schnorr_challenge(c_i0, &big_r, party_index) {
+            let z = r + e * s_i;
+            return (big_r, z);
+        }
+    }
 }
 
 /// Verify a Schnorr proof: z·G == R + e·C_i0
@@ -47,20 +51,36 @@ pub fn schnorr_verify(
     party_index: u32,
 ) -> bool {
     let lhs = ProjectivePoint::GENERATOR * z;
-    let e = schnorr_challenge(c_i0, big_r, party_index);
+    let Some(e) = schnorr_challenge(c_i0, big_r, party_index) else {
+        return false;
+    };
     let rhs = *big_r + *c_i0 * e;
     lhs == rhs
 }
 
-fn schnorr_challenge(c_i0: &ProjectivePoint, big_r: &ProjectivePoint, party_index: u32) -> Scalar {
-    use k256::elliptic_curve::group::GroupEncoding;
+fn schnorr_challenge(
+    c_i0: &ProjectivePoint,
+    big_r: &ProjectivePoint,
+    party_index: u32,
+) -> Option<Scalar> {
+    let party_index = u8::try_from(party_index).ok()?;
     let mut h = Sha256::new();
-    h.update(ProjectivePoint::GENERATOR.to_bytes());
-    h.update(c_i0.to_bytes());
-    h.update(big_r.to_bytes());
-    h.update(party_index.to_le_bytes());
+    h.update(compressed_point_bytes(&ProjectivePoint::GENERATOR));
+    h.update(compressed_point_bytes(c_i0));
+    h.update(compressed_point_bytes(big_r));
+    h.update([party_index]);
     let hash = h.finalize();
-    scalar_from_bytes_mod_n(&hash)
+    let fb = FieldBytes::from_slice(&hash);
+    Option::<Scalar>::from(Scalar::from_repr(*fb))
+}
+
+fn compressed_point_bytes(point: &ProjectivePoint) -> [u8; 33] {
+    let affine = point.to_affine();
+    let encoded: EncodedPoint = affine.to_encoded_point(true);
+    let bytes = encoded.as_bytes();
+    let mut out = [0u8; 33];
+    out.copy_from_slice(bytes);
+    out
 }
 
 /// Compute Feldman sub-share: f_i(j) = s_i + a_i·j  mod N
@@ -95,8 +115,7 @@ pub fn scalar_from_bytes_mod_n(bytes: &[u8]) -> Scalar {
 }
 
 pub fn point_to_hex(p: &ProjectivePoint) -> String {
-    use k256::elliptic_curve::group::GroupEncoding;
-    hex::encode(p.to_bytes())
+    hex::encode(compressed_point_bytes(p))
 }
 
 pub fn point_from_hex(s: &str) -> Result<ProjectivePoint> {

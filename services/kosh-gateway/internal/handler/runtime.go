@@ -3,8 +3,16 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"time"
 )
+
+func activeSenderAddress() string {
+	if v := os.Getenv("PARTISIA_SENDER_ADDRESS_1"); v != "" {
+		return v
+	}
+	return os.Getenv("PARTISIA_SENDER_ADDRESS")
+}
 
 // GET /api/v1/runtime/preflight?mode=create|sign&contract_address=&key_id=
 // Returns the shape the frontend expects (RuntimePreflight type in main.ts).
@@ -43,7 +51,7 @@ func (h *Handler) HandlePreflight(w http.ResponseWriter, r *http.Request) {
 			"ok":                    ready,
 			"backend_reachable":     true,
 			"relay_configured":      coordOnline,
-			"sender_address":        "",
+			"sender_address":        activeSenderAddress(),
 			"sender_gas_balance":    "0",
 			"sender_gas_ok":         true,
 			"local_runtime_present": true,
@@ -73,8 +81,14 @@ func (h *Handler) HandleRuntimeActive(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"ok":           true,
-		"runtime":      map[string]any{"running_jobs": summaries, "parties_up": len(h.clients.Parties)},
-		"checked_at":   time.Now().UTC().Format(time.RFC3339),
+		"ok": true,
+		"runtime": map[string]any{
+			"running_jobs":   summaries,
+			"parties_up":     len(h.clients.Parties),
+			"contract_address": os.Getenv("SIGNER_ADDRESS"),
+			"sender_address": activeSenderAddress(),
+			"sender_mode":    "shared",
+		},
+		"checked_at": time.Now().UTC().Format(time.RFC3339),
 	})
 }

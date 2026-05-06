@@ -112,35 +112,55 @@ impl ChainRelay {
 
         let sender_lock = self.sender_lock(&sender_address).await;
         let _sender_guard = sender_lock.lock().await;
-        let node = self.pick_node().await;
-        let (chain_id, nonce) = self.reserve_nonce(party_index, &node, &sender_address).await?;
+        let mut last_err: Option<anyhow::Error> = None;
 
-        let signed = sign_transaction(
-            &sender_key,
-            nonce,
-            current_time_millis() + 30_000,
-            500_000,
-            &chain_id,
-            contract_address,
-            &rpc,
-        )?;
+        for attempt in 1..=3 {
+            let node = self.pick_node().await;
+            let (chain_id, nonce) = self.reserve_nonce(party_index, &node, &sender_address).await?;
 
-        let tx = submit_serialized_transaction(&self.client, &node, &signed).await?;
-        tracing::info!("{label} submitted tx={}", tx.tx_hash);
+            let signed = sign_transaction(
+                &sender_key,
+                nonce,
+                current_time_millis() + 30_000,
+                500_000,
+                &chain_id,
+                contract_address,
+                &rpc,
+            )?;
 
-        wait_for_spawned_events(
-            &self.client,
-            &node,
-            &tx.destination_shard_id,
-            &tx.tx_hash,
-            Duration::from_secs(120),
-            Duration::from_secs(2),
-        )
-        .await
-        .and_then(|tree| {
-            ensure_execution_success(&tree)?;
-            Ok(tx.tx_hash)
-        })
+            match submit_serialized_transaction(&self.client, &node, &signed).await {
+                Ok(tx) => {
+                    tracing::info!("{label} submitted tx={} attempt={attempt}", tx.tx_hash);
+                    match wait_for_spawned_events(
+                        &self.client,
+                        &node,
+                        &tx.destination_shard_id,
+                        &tx.tx_hash,
+                        Duration::from_secs(120),
+                        Duration::from_secs(2),
+                    )
+                    .await
+                    .and_then(|tree| {
+                        ensure_execution_success(&tree)?;
+                        Ok(tx.tx_hash.clone())
+                    }) {
+                        Ok(tx_hash) => return Ok(tx_hash),
+                        Err(err) => return Err(err),
+                    }
+                }
+                Err(err) if is_unexpected_nonce_error(&err.to_string()) && attempt < 3 => {
+                    tracing::warn!(
+                        "{label} got UNEXPECTED_NONCE on attempt={attempt}; refreshing sender cache for {sender_address}"
+                    );
+                    self.invalidate_sender_nonce(&sender_address).await;
+                    last_err = Some(err);
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("submit failed after nonce retries")))
     }
 
     pub async fn submit_zk_input(
@@ -158,7 +178,10 @@ impl ChainRelay {
             .ok_or_else(|| anyhow!("no key configured for party {party_index}"))?
             .clone();
 
-        let mut rpc = vec![0x09u8, shortname];
+        // ZK secret-input transactions target the zk_on_secret_input_<shortname>
+        // entrypoint directly; unlike normal contract actions they must not be
+        // prefixed with 0x09.
+        let mut rpc = vec![shortname];
         rpc.extend_from_slice(public_args);
 
         let request = serde_json::json!({
@@ -172,33 +195,42 @@ impl ChainRelay {
             "maxRetries": self.node_urls.len(),
         });
 
-        let helper = zk_input_helper_path()?;
         let sender_lock = self.sender_lock(&sender_address).await;
         let _sender_guard = sender_lock.lock().await;
-        let mut child = tokio::process::Command::new("node")
-            .arg(helper)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn Partisia ZK input helper")?;
+        let helper = zk_input_helper_path()?;
+        let mut last_err: Option<anyhow::Error> = None;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            use tokio::io::AsyncWriteExt;
-            stdin.write_all(&serde_json::to_vec(&request)?).await?;
-        }
+        for attempt in 1..=3 {
+            let mut child = tokio::process::Command::new("node")
+                .arg(&helper)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("spawn Partisia ZK input helper")?;
 
-        let output = child.wait_with_output().await?;
-        if output.status.success() {
-            let response: Value = serde_json::from_slice(&output.stdout)
-                .context("decode zk helper stdout")?;
-            let tx_hash = response
-                .get("txHash")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("zk helper did not return txHash"))?;
-            tracing::info!("{label} submitted zk tx={tx_hash}");
-            Ok(tx_hash.to_string())
-        } else {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                stdin.write_all(&serde_json::to_vec(&request)?).await?;
+            }
+
+            let output = child.wait_with_output().await?;
+            if output.status.success() {
+                let response: Value = serde_json::from_slice(&output.stdout)
+                    .context("decode zk helper stdout")?;
+                let tx_hash = response
+                    .get("txHash")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("zk helper did not return txHash"))?;
+                let node_url = response
+                    .get("nodeUrl")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("zk helper did not return nodeUrl"))?;
+                self.sync_sender_nonce(node_url, &sender_address).await?;
+                tracing::info!("{label} submitted zk tx={tx_hash} attempt={attempt}");
+                return Ok(tx_hash.to_string());
+            }
+
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let msg = if !stderr.trim().is_empty() {
@@ -206,8 +238,20 @@ impl ChainRelay {
             } else {
                 stdout.trim().to_string()
             };
-            Err(anyhow!("zk input helper failed: {msg}"))
+
+            if is_unexpected_nonce_error(&msg) && attempt < 3 {
+                tracing::warn!(
+                    "{label} ZK helper got UNEXPECTED_NONCE on attempt={attempt}; refreshing sender cache for {sender_address}"
+                );
+                self.invalidate_sender_nonce(&sender_address).await;
+                last_err = Some(anyhow!("zk input helper failed: {msg}"));
+                continue;
+            }
+
+            return Err(anyhow!("zk input helper failed: {msg}"));
         }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("zk input helper failed after nonce retries")))
     }
 
     async fn pick_node(&self) -> String {
@@ -243,6 +287,22 @@ impl ChainRelay {
             .entry(sender_address.to_ascii_lowercase())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    async fn invalidate_sender_nonce(&self, sender_address: &str) {
+        let mut cache = self.nonce_cache.lock().await;
+        cache.remove(&sender_address.to_ascii_lowercase());
+    }
+
+    async fn sync_sender_nonce(&self, node: &str, sender_address: &str) -> Result<()> {
+        let chain_id = fetch_chain_id(&self.client, node).await?;
+        let next_nonce = fetch_nonce(&self.client, node, sender_address).await?;
+        let mut cache = self.nonce_cache.lock().await;
+        cache.insert(
+            sender_address.to_ascii_lowercase(),
+            (chain_id, next_nonce),
+        );
+        Ok(())
     }
 }
 
@@ -442,4 +502,10 @@ fn sha256_many(bufs: &[&[u8]]) -> [u8; 32] {
 fn current_time_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64
+}
+
+fn is_unexpected_nonce_error(msg: &str) -> bool {
+    msg.contains("UNEXPECTED_NONCE")
+        || msg.contains("nonce did not match the expected nonce")
+        || msg.contains("expected nonce of the sender account")
 }

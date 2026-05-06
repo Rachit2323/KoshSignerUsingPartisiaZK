@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,15 +11,30 @@ import (
 	"sync"
 	"time"
 
+	bb_pb "github.com/kosh/gateway/pb/bb"
 	party_pb "github.com/kosh/gateway/pb/party"
 	policy_pb "github.com/kosh/gateway/pb/policy"
-	bb_pb "github.com/kosh/gateway/pb/bb"
 )
 
 type createKeyBody struct {
 	ContractAddress string `json:"contract_address"`
 	NumParties      uint32 `json:"num_parties"`
 	KeyID           uint32 `json:"key_id"`
+}
+
+func allocateKeyID() uint32 {
+	var buf [4]byte
+	if _, err := cryptorand.Read(buf[:]); err == nil {
+		keyID := binary.BigEndian.Uint32(buf[:]) & 0x7FFFFFFF
+		if keyID > 0 {
+			return keyID
+		}
+	}
+	keyID := uint32(time.Now().UnixNano() & 0x7FFFFFFF)
+	if keyID == 0 {
+		return 1
+	}
+	return keyID
 }
 
 // POST /api/v1/passkeys/create-key
@@ -38,15 +55,14 @@ func (h *Handler) HandlePasskeysCreateKey(w http.ResponseWriter, r *http.Request
 	}
 	keyID := body.KeyID
 	if keyID == 0 {
-		keyID = 1
+		keyID = allocateKeyID()
 	}
 	threshold := numParties/2 + 1
 
-	// Use timestamp-based key_id so each run gets fresh BB topics
-	if keyID == 1 {
-		keyID = uint32(time.Now().Unix() & 0xFFFF)
-		if keyID == 0 {
-			keyID = 1
+	for _, running := range h.jobs.ListRunning() {
+		if running.Type == "dkg" {
+			jsonError(w, "a create-key job is already running; wait for it to finish or fail before retrying", http.StatusConflict)
+			return
 		}
 	}
 
@@ -140,11 +156,11 @@ func (h *Handler) HandlePasskeysCreateKey(w http.ResponseWriter, r *http.Request
 }
 
 type reuseSignBody struct {
-	TxTag         string   `json:"tx_tag"`
+	TxTag          string   `json:"tx_tag"`
 	SigningParties []uint32 `json:"signing_parties"`
-	Threshold     uint32   `json:"threshold"`
-	MsgHashHex    string   `json:"msg_hash_hex"`
-	SessionID     uint32   `json:"session_id"`
+	Threshold      uint32   `json:"threshold"`
+	MsgHashHex     string   `json:"msg_hash_hex"`
+	SessionID      uint32   `json:"session_id"`
 }
 
 // POST /api/v1/passkeys/reuse-sign

@@ -44,6 +44,8 @@ type RuntimeJobSummary = {
 type RuntimeActivePayload = {
   parties_up: number;
   running_jobs: RuntimeJobSummary[];
+  sender_address?: string;
+  sender_mode?: string;
 };
 
 type PasskeyLinkedKey = {
@@ -106,15 +108,27 @@ type AppState = {
   error: string | null;
 };
 
-const storageKey = "kosh-frontend-threshold-state-v4";
-const defaultContractAddress = "031fb3ede8b7274ffb94ef250ba3747e49b2706d12";
+const storageKey = "kosh-frontend-threshold-state-v5";
+const defaultContractAddress = "0353980c937b95faac89ee9af366471b64d9206f2e";
 const defaultKeyId = 63001;
 const defaultRecipient = "0xb0538910f0Abffc41F0CF701E626975E51e92bC7" as Hex;
 const defaultApiBaseUrl = "http://127.0.0.1:8080";
+const legacyContractAddresses = new Set([
+  "03d69b9a696147c8545aa580b2e528e69928d171e5",
+  "031fb3ede8b7274ffb94ef250ba3747e49b2706d12",
+  "03a1e8aba3ba45c1e42d01f688768436cb2b572de0",
+]);
+
+function normalizeSignerAddress(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return defaultContractAddress;
+  if (legacyContractAddresses.has(trimmed)) return defaultContractAddress;
+  return trimmed;
+}
 
 const state: AppState = {
   mode: load("mode", "existing") as FrontendMode,
-  signerAddress: load("signerAddress", defaultContractAddress),
+  signerAddress: normalizeSignerAddress(load("signerAddress", defaultContractAddress)),
   keyId: Number(load("keyId", String(defaultKeyId))),
   numParties: Number(load("numParties", "3")),
   recipient: load("recipient", defaultRecipient) as Hex,
@@ -844,6 +858,8 @@ async function syncActiveRuntime(): Promise<void> {
               status: typeof job.status === "string" ? job.status : "unknown",
             }))
         : [],
+      sender_address: typeof runtime.sender_address === "string" ? runtime.sender_address : undefined,
+      sender_mode: typeof runtime.sender_mode === "string" ? runtime.sender_mode : undefined,
     };
     persist();
     render();
@@ -1058,6 +1074,16 @@ function render(): void {
           <span class="stat-label">Running Jobs</span>
           <span class="stat-value">${state.runtimeActive.running_jobs.length}</span>
         </div>
+        ${state.runtimeActive.sender_address ? `
+        <div class="stat">
+          <span class="stat-label">Sender</span>
+          <span class="stat-value mono" style="font-size:0.78em;word-break:break-all;">${escapeHtml(state.runtimeActive.sender_address)}</span>
+        </div>` : ""}
+        ${state.runtimeActive.sender_mode ? `
+        <div class="stat">
+          <span class="stat-label">Sender Mode</span>
+          <span class="stat-value">${escapeHtml(state.runtimeActive.sender_mode)}</span>
+        </div>` : ""}
       </div>
       ${state.runtimeActive.running_jobs.length ? `
         <div class="section callout">

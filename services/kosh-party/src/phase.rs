@@ -5,7 +5,7 @@
 /// - Encrypted share persistence is mandatory.
 /// - Local signing and in-memory share fallbacks are intentionally disabled.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use k256::Scalar;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -35,6 +35,25 @@ use party_pb::{
     dkg_event::Phase as DkgPhase,
     sign_event::Phase as SignPhase,
 };
+
+const DKG_ONCHAIN_TIMEOUT: Duration = Duration::from_secs(180);
+
+async fn wait_for_bb_barrier(
+    bb: &mut BulletinBoard,
+    key_id: u32,
+    prefix: &str,
+    num_parties: u32,
+    party_index: u32,
+) -> Result<()> {
+    for j in 1..=num_parties {
+        if j == party_index {
+            continue;
+        }
+        let topic = format!("{prefix}_{key_id}_party_{j}");
+        bb.watch_one(&topic, DKG_ONCHAIN_TIMEOUT).await?;
+    }
+    Ok(())
+}
 
 // ── DKG ──────────────────────────────────────────────────────────────────────
 
@@ -76,26 +95,13 @@ pub async fn run_dkg(
     use k256::elliptic_curve::group::GroupEncoding;
 
     if !on_chain {
-        // Local-only mode: skip all Partisia on-chain submissions.
-        send(DkgPhase::DkgZkSubmitted, "ZK share halves submitted (simulated)".into());
-        let store = ShareStore::new(&cfg.keystore_dir, &cfg.keystore_master_key)?;
-        store.save(&PersistedShare {
-            contract_address: cfg.signer_address.clone(),
-            key_id,
-            party_index: cfg.party_index as u8,
-            public_key_hex: combined_pk_hex.clone(),
-            shamir_share_hex: dkg::scalar_to_hex(&x_i),
-            next_task_id: 1,
-            runtime_version: "kosh-party-v1".into(),
-        })?;
-        send(DkgPhase::DkgComplete, format!("combined_pk={combined_pk_hex}"));
-        return Ok(());
+        return Err(anyhow!("on-chain signer contract is required in strict mode"));
     }
 
     let mut relay = ChainRelayClient::connect(&cfg.chain_relay_addr).await?;
     let contract = &cfg.signer_address;
 
-        // Party 1 creates key on-chain
+    // Party 1 creates the DKG key on-chain.
     if cfg.party_index == 1 {
         tracing::info!("[party 1] 0x20 dkg_create_key key={key_id}");
         relay.submit_action(
@@ -103,12 +109,16 @@ pub async fn run_dkg(
             ca::build_dkg_create_key(key_id, num_parties as u8),
             "dkg_create_key",
         ).await?;
-    } else {
-        // Wait for Party 1 to have created the key (small delay)
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
-        // All parties: build on-chain commit data from local DKG output
+    if cfg.party_index == 1 {
+        bb.post(&format!("dkg_create_onchain_{key_id}"), "ok").await?;
+    } else {
+        tracing::info!("[party {}] waiting for on-chain DKG create key={key_id}", cfg.party_index);
+        bb.watch_one(&format!("dkg_create_onchain_{key_id}"), DKG_ONCHAIN_TIMEOUT).await?;
+    }
+
+    // All parties: build on-chain commit data from local DKG output.
     let my_commit = commits.get(&cfg.party_index)
         .ok_or_else(|| anyhow::anyhow!("own commit missing from BB"))?;
 
@@ -127,25 +137,34 @@ pub async fn run_dkg(
         ),
         "dkg_commit",
     ).await?;
+    bb.post(&format!("dkg_commit_onchain_{key_id}_party_{}", cfg.party_index), "ok").await?;
 
-        // All parties: reveal public key share (c_i0)
+    tracing::info!("[party {}] waiting for all DKG commits key={key_id}", cfg.party_index);
+    wait_for_bb_barrier(&mut bb, key_id, "dkg_commit_onchain", num_parties, cfg.party_index).await?;
+
+    // All parties: reveal public key share (c_i0) only after contract enters reveal phase.
     tracing::info!("[party {}] 0x22 dkg_reveal key={key_id}", cfg.party_index);
     relay.submit_action(
         cfg.party_index, contract, 0x22,
         ca::build_dkg_reveal(key_id, cfg.party_index as u8, &c_i0_bytes),
         "dkg_reveal",
     ).await?;
+    bb.post(&format!("dkg_reveal_onchain_{key_id}_party_{}", cfg.party_index), "ok").await?;
 
-        // Party 1: finalize the public DKG state first.
+    tracing::info!("[party {}] waiting for all DKG reveals key={key_id}", cfg.party_index);
+    wait_for_bb_barrier(&mut bb, key_id, "dkg_reveal_onchain", num_parties, cfg.party_index).await?;
+
+    // Party 1 finalizes the public DKG state after all reveals are visible.
     if cfg.party_index == 1 {
         tracing::info!("[party 1] 0x23 dkg_finalize key={key_id}");
         relay.submit_action(cfg.party_index, contract, 0x23, ca::build_dkg_finalize(key_id), "dkg_finalize").await?;
+        bb.post(&format!("dkg_finalize_onchain_{key_id}"), "ok").await?;
+    } else {
+        tracing::info!("[party {}] waiting for DKG finalize key={key_id}", cfg.party_index);
+        bb.watch_one(&format!("dkg_finalize_onchain_{key_id}"), DKG_ONCHAIN_TIMEOUT).await?;
     }
 
-        // After finalize, all parties upload their Lagrange-ready share halves as encrypted ZK inputs.
-    if cfg.party_index != 1 {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
+    // After finalize, all parties upload their Lagrange-ready share halves as encrypted ZK inputs.
     let x_i_bytes = x_i.to_bytes();
     let (x_hi, x_lo) = split_scalar_halves(&x_i_bytes);
 
@@ -168,22 +187,18 @@ pub async fn run_dkg(
         x_lo.to_vec(),
         "submit_key_share_lo",
     ).await?;
+    bb.post(&format!("dkg_share_uploaded_{key_id}_party_{}", cfg.party_index), "ok").await?;
+    tracing::info!("[party {}] waiting for all DKG share uploads key={key_id}", cfg.party_index);
+    wait_for_bb_barrier(&mut bb, key_id, "dkg_share_uploaded", num_parties, cfg.party_index).await?;
 
-        // Party 1 completes keygen after the secret shares are on the ZK side.
+    // Party 1 completes keygen after the secret shares are on the ZK side.
     if cfg.party_index == 1 {
         tracing::info!("[party 1] 0x24 dkg_complete_keygen key={key_id}");
         relay.submit_action(cfg.party_index, contract, 0x24, ca::build_dkg_complete_keygen(key_id), "dkg_complete_keygen").await?;
-
-        let on_chain_pk = relay.poll_until(
-            contract,
-            |state| {
-                let pk = state["keys"][key_id.to_string()]["public_key"].as_str()?;
-                let disc = state["keys"][key_id.to_string()]["keygen_phase"]["discriminant"].as_u64()?;
-                if disc == 2 { Some(pk.to_string()) } else { None }
-            },
-            Duration::from_secs(120),
-        ).await?;
-        tracing::info!("[party 1] DKG confirmed on Partisia: pk={on_chain_pk}");
+        bb.post(&format!("dkg_complete_onchain_{key_id}"), "ok").await?;
+    } else {
+        tracing::info!("[party {}] waiting for DKG complete key={key_id}", cfg.party_index);
+        bb.watch_one(&format!("dkg_complete_onchain_{key_id}"), DKG_ONCHAIN_TIMEOUT).await?;
     }
 
     send(DkgPhase::DkgZkSubmitted, format!(
