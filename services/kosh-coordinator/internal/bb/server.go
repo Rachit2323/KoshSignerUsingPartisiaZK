@@ -44,12 +44,15 @@ func (s *Server) Watch(req *pb.WatchRequest, stream pb.BulletinBoard_WatchServer
 
 	for {
 		select {
-		case val := <-ch:
+		case val, open := <-ch:
+			if !open {
+				// Channel closed by Clear() — this Watch subscription is cancelled.
+				return nil
+			}
 			if err := stream.Send(&pb.WatchEvent{Topic: topic, Value: val}); err != nil {
 				return err
 			}
 		case <-stream.Context().Done():
-			// Client disconnected — goroutine exits cleanly.
 			return nil
 		}
 	}

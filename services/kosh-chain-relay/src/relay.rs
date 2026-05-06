@@ -20,7 +20,8 @@ pub struct ChainRelay {
     parties: Arc<HashMap<u32, (String, String)>>,
     client: Client,
     node_cursor: Arc<Mutex<usize>>,
-    nonce_cache: Arc<Mutex<HashMap<u32, (String, i64)>>>, // party → (chain_id, next_nonce)
+    nonce_cache: Arc<Mutex<HashMap<String, (String, i64)>>>, // sender_address → (chain_id, next_nonce)
+    sender_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 impl ChainRelay {
@@ -34,6 +35,7 @@ impl ChainRelay {
             client: Client::new(),
             node_cursor: Arc::new(Mutex::new(0)),
             nonce_cache: Arc::new(Mutex::new(HashMap::new())),
+            sender_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -108,6 +110,8 @@ impl ChainRelay {
         let mut rpc = vec![0x09u8, shortname];
         rpc.extend_from_slice(args);
 
+        let sender_lock = self.sender_lock(&sender_address).await;
+        let _sender_guard = sender_lock.lock().await;
         let node = self.pick_node().await;
         let (chain_id, nonce) = self.reserve_nonce(party_index, &node, &sender_address).await?;
 
@@ -169,6 +173,8 @@ impl ChainRelay {
         });
 
         let helper = zk_input_helper_path()?;
+        let sender_lock = self.sender_lock(&sender_address).await;
+        let _sender_guard = sender_lock.lock().await;
         let mut child = tokio::process::Command::new("node")
             .arg(helper)
             .stdin(Stdio::piped())
@@ -213,12 +219,13 @@ impl ChainRelay {
 
     async fn reserve_nonce(
         &self,
-        party: u32,
+        _party: u32,
         node: &str,
         sender_address: &str,
     ) -> Result<(String, i64)> {
         let mut cache = self.nonce_cache.lock().await;
-        if let Some((chain_id, nonce)) = cache.get_mut(&party) {
+        let sender_key = sender_address.to_ascii_lowercase();
+        if let Some((chain_id, nonce)) = cache.get_mut(&sender_key) {
             let reserved = (*chain_id).clone();
             let n = *nonce;
             *nonce += 1;
@@ -226,8 +233,16 @@ impl ChainRelay {
         }
         let chain_id = fetch_chain_id(&self.client, node).await?;
         let nonce = fetch_nonce(&self.client, node, sender_address).await?;
-        cache.insert(party, (chain_id.clone(), nonce + 1));
+        cache.insert(sender_key, (chain_id.clone(), nonce + 1));
         Ok((chain_id, nonce))
+    }
+
+    async fn sender_lock(&self, sender_address: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.sender_locks.lock().await;
+        locks
+            .entry(sender_address.to_ascii_lowercase())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 

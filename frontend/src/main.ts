@@ -35,6 +35,17 @@ type RuntimeSummary = {
   updatedAt: string;
 };
 
+type RuntimeJobSummary = {
+  id: string;
+  type: string;
+  status: string;
+};
+
+type RuntimeActivePayload = {
+  parties_up: number;
+  running_jobs: RuntimeJobSummary[];
+};
+
 type PasskeyLinkedKey = {
   contract_address: string;
   key_id: number;
@@ -91,6 +102,7 @@ type AppState = {
   latestSepoliaTxHash: string | null;
   currentJob: JobRecord | null;
   activeSignSession: SignSession | null;
+  runtimeActive: RuntimeActivePayload | null;
   error: string | null;
 };
 
@@ -119,6 +131,7 @@ const state: AppState = {
   latestSepoliaTxHash: null,
   currentJob: null,
   activeSignSession: null,
+  runtimeActive: null,
   error: null,
 };
 
@@ -286,14 +299,28 @@ function txReady(): boolean {
   return Boolean(state.signingHash && state.unsignedTx);
 }
 
+function alternateBaseUrls(url: string): string[] {
+  const trimmed = url.replace(/\/+$/, "");
+  const options = [trimmed];
+  if (trimmed.includes("127.0.0.1")) {
+    options.push(trimmed.replace("127.0.0.1", "localhost"));
+  } else if (trimmed.includes("localhost")) {
+    options.push(trimmed.replace("localhost", "127.0.0.1"));
+  }
+  return [...new Set(options)];
+}
+
 function hasSelectedPasskeyKey(): boolean {
   return Boolean(state.passkeyAccount?.selected_key);
 }
 
+function effectiveEvmAddress(): string | null {
+  return state.status?.evmAddress ?? state.currentJob?.createdEvmAddress ?? null;
+}
+
 function canBuildTx(): boolean {
   return Boolean(
-    state.mode === "existing" &&
-    state.status?.evmAddress &&
+    effectiveEvmAddress() &&
     state.recipient &&
     /^[0-9]+$/.test(state.amountWei) &&
     BigInt(state.amountWei || "0") > 0n,
@@ -302,25 +329,36 @@ function canBuildTx(): boolean {
 
 function canStartSigning(): boolean {
   return Boolean(
-    state.mode === "existing" &&
     state.passkeySessionToken &&
     hasSelectedPasskeyKey() &&
     state.status?.exists &&
-    txReady() &&
     !state.activeSignSession,
   );
 }
 
 async function ensureBackendAvailable(): Promise<void> {
-  let resp: Response;
-  try {
-    resp = await fetch(`${baseUrl()}/api/v1/health`);
-  } catch (err) {
-    throw new Error(`Cannot reach Rust backend at ${baseUrl()}. Start the backend and confirm CORS is enabled. (${err instanceof Error ? err.message : String(err)})`);
+  let lastError: unknown = null;
+  for (const candidate of alternateBaseUrls(baseUrl())) {
+    try {
+      const resp = await fetch(`${candidate}/api/v1/health`);
+      if (!resp.ok) {
+        lastError = new Error(`Rust backend health check failed: ${resp.status}`);
+        continue;
+      }
+      if (state.apiBaseUrl !== candidate) {
+        state.apiBaseUrl = candidate;
+        persist();
+      }
+      if (state.error?.includes("Cannot reach Rust backend")) {
+        state.error = null;
+        render();
+      }
+      return;
+    } catch (err) {
+      lastError = err;
+    }
   }
-  if (!resp.ok) {
-    throw new Error(`Rust backend health check failed: ${resp.status}`);
-  }
+  throw new Error(`Cannot reach Rust backend at ${baseUrl()}. Start the backend and confirm CORS is enabled. (${lastError instanceof Error ? lastError.message : String(lastError)})`);
 }
 
 async function fetchPreflight(mode: "create" | "sign"): Promise<RuntimePreflight> {
@@ -384,14 +422,29 @@ function applyCreatedKeyResult(job: JobRecord): void {
 
 async function refreshPasskeyMe(): Promise<void> {
   if (!state.passkeySessionToken) return;
-  const resp = await passkeyFetch('/api/v1/passkeys/me');
+  let resp: Response;
+  try {
+    resp = await passkeyFetch('/api/v1/passkeys/me');
+  } catch {
+    // passkeyFetch throws when session is stale — already cleared token
+    render();
+    return;
+  }
   if (!resp.ok) {
     state.passkeySessionToken = null;
     state.passkeyAccount = null;
     persist();
+    render();
     return;
   }
   const body = (await resp.json()) as { me?: { authenticated: boolean; account?: PasskeyAccount | null } };
+  if (!body.me?.authenticated) {
+    state.passkeySessionToken = null;
+    state.passkeyAccount = null;
+    persist();
+    render();
+    return;
+  }
   state.passkeyAccount = body.me?.account ?? null;
   const selected = state.passkeyAccount?.selected_key ?? null;
   if (selected) {
@@ -399,6 +452,16 @@ async function refreshPasskeyMe(): Promise<void> {
     state.keyId = selected.key_id;
   }
   persist();
+  if (selected) {
+    await handleLoadKey().catch(() => undefined);
+  } else {
+    state.status = null;
+    state.signingHash = null;
+    state.txPreview = null;
+    state.unsignedTx = null;
+    state.currentJob = null;
+    render();
+  }
 }
 
 async function handlePasskeyRegister(): Promise<void> {
@@ -431,7 +494,8 @@ async function handlePasskeyRegister(): Promise<void> {
     persist();
     render();
     if (!state.passkeyAccount?.linked_keys?.length) {
-      setError('Passkey registered, but no key is linked yet. Create a new key or link an existing one on this backend.');
+      state.error = null;
+      render();
     }
   } catch (err) {
     setError(err instanceof Error ? err.message : String(err));
@@ -494,12 +558,29 @@ async function maybeLinkCreatedKeyToPasskey(): Promise<void> {
   const resp = await passkeyFetch('/api/v1/passkeys/link-key', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contract_address: state.signerAddress, key_id: state.keyId, label: `Kosh Key ${state.keyId}` }),
+    body: JSON.stringify({
+      contract_address: state.signerAddress,
+      key_id: state.keyId,
+      label: `Kosh Key ${state.keyId}`,
+      combined_pk_hex: state.status?.combined_pk_hex ?? state.status?.evmAddress ?? "",
+      evm_address: state.status?.evmAddress ?? "",
+    }),
   });
   if (!resp.ok) return;
   const body = await resp.json() as { account?: PasskeyAccount };
   if (body.account) {
     state.passkeyAccount = body.account;
+    // Auto-select the newly linked key so Build Transaction works immediately
+    if (!state.passkeyAccount.selected_key && state.passkeyAccount.linked_keys.length > 0) {
+      const newest = state.passkeyAccount.linked_keys[state.passkeyAccount.linked_keys.length - 1];
+      state.passkeyAccount.selected_key = newest;
+      // Also persist the selection on the server
+      passkeyFetch('/api/v1/passkeys/select-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contract_address: newest.contract_address, key_id: newest.key_id }),
+      }).catch(() => undefined);
+    }
     persist();
   }
 }
@@ -609,12 +690,14 @@ async function handleCreateKey(): Promise<void> {
 async function handleBuildTx(): Promise<void> {
   try {
     setError(null);
-    if (!state.status?.evmAddress) throw new Error("Load a threshold key first.");
-    if (!hasSelectedPasskeyKey()) throw new Error("Sign in with a passkey and select a linked key first.");
+    const fromAddress = effectiveEvmAddress();
+    if (!fromAddress) throw new Error("Load a threshold key first.");
+    if (!hasSelectedPasskeyKey() && !state.passkeySessionToken) throw new Error("Sign in with a passkey first.");
     state.currentJob = null;
     state.latestSepoliaTxHash = null;
     const tx = await buildEthTransfer({
-      from: state.status.evmAddress as `0x${string}`,
+      apiBaseUrl: baseUrl(),
+      from: fromAddress as `0x${string}`,
       to: state.recipient,
       value: BigInt(state.amountWei),
     });
@@ -631,6 +714,9 @@ async function handleBuildTx(): Promise<void> {
 async function handleStartSigning(): Promise<void> {
   try {
     setError(null);
+    if (!txReady()) {
+      await handleBuildTx();
+    }
     const preflight = await fetchPreflight("sign");
     if (!preflight.ok || !preflight.can_sign) throw new Error(preflight.message);
     if (!state.signingHash) throw new Error("Build Tx + Signing Hash first.");
@@ -662,7 +748,7 @@ async function handleStartSigning(): Promise<void> {
       keyId: state.keyId,
       signingHash: state.signingHash!,
       unsignedTx: state.unsignedTx!,
-      evmAddress: state.status!.evmAddress! as `0x${string}`,
+      evmAddress: (effectiveEvmAddress() ?? "") as `0x${string}`,
     };
     render();
     pollJob();
@@ -687,17 +773,13 @@ async function refreshJob(): Promise<void> {
       if (typeof completedJob.activeKeyId === "number") state.keyId = completedJob.activeKeyId;
       if (completedJob.activeContractAddress) state.signerAddress = completedJob.activeContractAddress;
       applyCreatedKeyResult(completedJob);
-      render();
-      await waitForCreatedKey();
-      await maybeLinkCreatedKeyToPasskey();
-      await syncSelectedPasskeyKey();
-      state.mode = "existing";
+      state.mode = "existing"; // set BEFORE any async that might throw
       persist();
-      if (state.status?.evmAddress) {
-        await handleBuildTx();
-      } else {
-        render();
-      }
+      render();
+      await waitForCreatedKey().catch(() => undefined);
+      await maybeLinkCreatedKeyToPasskey().catch(() => undefined);
+      await syncSelectedPasskeyKey().catch(() => undefined);
+      render();
     } else {
       await finalizeSigningResult(completedJob);
     }
@@ -724,7 +806,7 @@ async function finalizeSigningResult(completedJob: JobRecord): Promise<void> {
     state.latestSignatureHex = signatureHex;
     const { r, s, recoveryId } = parseSignatureBytes(hexToBytes(signatureHex), session.signingHash, session.evmAddress);
     const signedTx = signTransaction(reviveUnsignedTx(session.unsignedTx) as never, r, s, recoveryId);
-    const evmTxHash = await submitSignedTransaction(signedTx);
+    const evmTxHash = await submitSignedTransaction(signedTx, baseUrl());
     state.latestSepoliaTxHash = evmTxHash;
     state.currentJob = { ...completedJob, evmTxHash };
     state.activeSignSession = null;
@@ -742,8 +824,8 @@ async function syncActiveRuntime(): Promise<void> {
   try {
     await ensureBackendAvailable();
     const resp = await fetch(`${baseUrl()}/api/v1/runtime/active`);
-  if (!resp.ok) return;
-  const body = (await resp.json()) as { ok?: boolean; runtime?: RuntimeSummary | null };
+    if (!resp.ok) return;
+    const body = (await resp.json()) as { ok?: boolean; runtime?: RuntimeSummary | RuntimeActivePayload | null };
     if (!body.ok || !body.runtime) return;
     const runtime = body.runtime as unknown as Record<string, unknown>;
     if (typeof runtime.contract_address === "string") state.signerAddress = String(runtime.contract_address);
@@ -751,6 +833,18 @@ async function syncActiveRuntime(): Promise<void> {
     if (typeof runtime.evm_address === "string" && state.status) {
       state.status = { ...state.status, evmAddress: runtime.evm_address as Hex };
     }
+    state.runtimeActive = {
+      parties_up: typeof runtime.parties_up === "number" ? runtime.parties_up : 0,
+      running_jobs: Array.isArray(runtime.running_jobs)
+        ? runtime.running_jobs
+            .filter((job): job is Record<string, unknown> => typeof job === "object" && job !== null)
+            .map((job) => ({
+              id: typeof job.id === "string" ? job.id : "",
+              type: typeof job.type === "string" ? job.type : "unknown",
+              status: typeof job.status === "string" ? job.status : "unknown",
+            }))
+        : [],
+    };
     persist();
     render();
   } catch {
@@ -901,6 +995,13 @@ function render(): void {
         <button id="buildTx" class="secondary" ${canBuildTx() ? "" : "disabled"}>Build Transaction</button>
         <button id="startSigning" ${canStartSigning() ? "" : "disabled"}>Sign &amp; Send</button>
       </div>
+      ${state.txPreview ? `
+        <div class="section callout">
+          <div class="stat-label">Signing Hash</div>
+          <div class="stat-value mono" style="word-break:break-all;font-size:0.8em;">${escapeHtml(state.signingHash ?? "—")}</div>
+          <div class="stat-label section">Unsigned Transaction</div>
+          <pre class="mono section" style="white-space:pre-wrap;word-break:break-word;">${escapeHtml(state.txPreview)}</pre>
+        </div>` : ""}
       ${state.currentJob && state.mode === "existing" ? `
         <div class="section callout">
           <div class="stat-value ${state.currentJob.status === "completed" ? "success" : state.currentJob.status === "failed" ? "danger" : ""}">
@@ -945,6 +1046,32 @@ function render(): void {
       </div>` : ""}
     </section>` : "";
 
+  const runtimePanel = state.runtimeActive ? `
+    <section class="panel section">
+      <div class="eyebrow">Runtime</div>
+      <div class="stat-grid section">
+        <div class="stat">
+          <span class="stat-label">Parties Up</span>
+          <span class="stat-value">${state.runtimeActive.parties_up}/3</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Running Jobs</span>
+          <span class="stat-value">${state.runtimeActive.running_jobs.length}</span>
+        </div>
+      </div>
+      ${state.runtimeActive.running_jobs.length ? `
+        <div class="section callout">
+          ${state.runtimeActive.running_jobs.map((job) => `
+            <div class="section">
+              <div class="stat-label">${escapeHtml(job.type)}</div>
+              <div class="stat-value mono" style="font-size:0.8em;">${escapeHtml(job.id)}</div>
+              <div class="stat-value">${escapeHtml(job.status)}</div>
+            </div>
+          `).join("")}
+        </div>` : `
+        <p class="section" style="opacity:0.7;font-size:0.9em;">No running jobs right now.</p>`}
+    </section>` : "";
+
   app.innerHTML = `
     <section class="hero">
       <div class="panel">
@@ -958,6 +1085,7 @@ function render(): void {
       </div>
     </section>
     ${walletCard}
+    ${runtimePanel}
     ${authSection}
     ${keySection}
     ${signSection}
@@ -976,7 +1104,13 @@ function bindEvents(): void {
 
   signerInput?.addEventListener("input", (e) => {
     state.signerAddress = (e.target as HTMLInputElement).value;
+    state.status = null;
+    state.signingHash = null;
+    state.txPreview = null;
+    state.unsignedTx = null;
+    state.currentJob = null;
     persist();
+    render();
   });
   apiBaseUrlInput?.addEventListener("input", (e) => {
     state.apiBaseUrl = (e.target as HTMLInputElement).value;
@@ -1039,3 +1173,12 @@ function escapeAttr(value: string): string {
 render();
 void syncActiveRuntime().catch(() => undefined);
 void refreshPasskeyMe().catch(() => undefined);
+if (state.signerAddress && state.keyId) {
+  void handleLoadKey().catch(() => undefined);
+}
+window.setInterval(() => {
+  void syncActiveRuntime().catch(() => undefined);
+}, 2000);
+window.setInterval(() => {
+  void ensureBackendAvailable().catch(() => undefined);
+}, 3000);

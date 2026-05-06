@@ -18,14 +18,26 @@ require_env() {
   fi
 }
 
+# Only SIGNER_ADDRESS is required; chain relay vars default to empty (local/offline mode)
 require_env SIGNER_ADDRESS
-require_env PARTISIA_NODE_URLS
+
+PARTISIA_NODE_URLS="${PARTISIA_NODE_URLS:-https://node1.testnet.partisiablockchain.com,https://node2.testnet.partisiablockchain.com,https://node3.testnet.partisiablockchain.com,https://node4.testnet.partisiablockchain.com}"
+PARTISIA_SENDER_KEY_1="${PARTISIA_SENDER_KEY_1:-${PARTISIA_SENDER_KEY:-}}"
+PARTISIA_SENDER_KEY_2="${PARTISIA_SENDER_KEY_2:-${PARTISIA_SENDER_KEY:-}}"
+PARTISIA_SENDER_KEY_3="${PARTISIA_SENDER_KEY_3:-${PARTISIA_SENDER_KEY:-}}"
+
 require_env PARTISIA_SENDER_KEY_1
-require_env PARTISIA_SENDER_ADDRESS_1
 require_env PARTISIA_SENDER_KEY_2
-require_env PARTISIA_SENDER_ADDRESS_2
 require_env PARTISIA_SENDER_KEY_3
-require_env PARTISIA_SENDER_ADDRESS_3
+
+derive_sender_address() {
+  local sender_key="$1"
+  printf '%s' "$sender_key" | node "$REPO/frontend/scripts/derive-partisia-sender.mjs"
+}
+
+PARTISIA_SENDER_ADDRESS_1="$(derive_sender_address "$PARTISIA_SENDER_KEY_1")"
+PARTISIA_SENDER_ADDRESS_2="$(derive_sender_address "$PARTISIA_SENDER_KEY_2")"
+PARTISIA_SENDER_ADDRESS_3="$(derive_sender_address "$PARTISIA_SENDER_KEY_3")"
 
 # ── Kill any leftover processes on our ports ──────────────────────────────────
 echo "Clearing old processes on ports 50051 50052 50060 50061 50062 8080 9090..."
@@ -86,7 +98,7 @@ fi
 
 # ── kosh-chain-relay (Partisia blockchain client) ─────────────────────────────
 RELAY_BIN="$REPO/target/release/kosh-chain-relay"
-if [ ! -f "$RELAY_BIN" ]; then
+if [ ! -f "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/relay.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/grpc_server.rs" -nt "$RELAY_BIN" ]; then
   echo "Building kosh-chain-relay (first run)..."
   (cd "$REPO" && cargo build -p kosh-chain-relay --release 2>&1 | tail -3)
 fi
@@ -111,9 +123,13 @@ if [ -z "$KEYSTORE_MASTER_KEY" ]; then
   echo "  Generated KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY (set as env var to persist)"
 fi
 
+# Always run parties against the configured signer. Do not silently fall back
+# to local-only mode; the UI/backend assume the live signer path is active.
+PARTY_SIGNER="$SIGNER_ADDRESS"
+
 PARTY_COMMON="COORDINATOR_ADDR=http://localhost:50051 \
   CHAIN_RELAY_ADDR=http://localhost:50053 \
-  SIGNER_ADDRESS=$SIGNER_ADDRESS \
+  SIGNER_ADDRESS=$PARTY_SIGNER \
   KEYSTORE_DIR=$REPO/.kosh-shares \
   KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY"
 

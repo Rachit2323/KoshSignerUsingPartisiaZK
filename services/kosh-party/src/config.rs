@@ -42,9 +42,7 @@ impl Config {
             keystore_master_key: std::env::var("KEYSTORE_MASTER_KEY").unwrap_or_default(),
         };
 
-        if cfg.signer_address.is_empty() {
-            bail!("SIGNER_ADDRESS is required; local signing fallback has been removed");
-        }
+        // Empty SIGNER_ADDRESS = local-only mode (no Partisia on-chain submissions)
         if cfg.keystore_dir.is_empty() || cfg.keystore_master_key.is_empty() {
             bail!("KEYSTORE_DIR and KEYSTORE_MASTER_KEY are required; in-memory share fallback has been removed");
         }

@@ -35,6 +35,8 @@ func Middleware(secret string) func(http.Handler) http.Handler {
 				"/api/v1/runtime/active":             true,
 				"/api/v1/threshold/key-status":       true,
 				"/api/v1/threshold/task-signature":   true,
+				"/api/v1/evm/build-eth-transfer":     true,
+				"/api/v1/evm/broadcast-signed":       true,
 			}
 			if pub[r.URL.Path] {
 				next.ServeHTTP(w, r)

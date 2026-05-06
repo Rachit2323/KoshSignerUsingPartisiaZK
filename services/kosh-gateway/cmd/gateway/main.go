@@ -65,6 +65,8 @@ func main() {
 	// Runtime status
 	mux.HandleFunc("GET /api/v1/runtime/preflight", h.HandlePreflight)
 	mux.HandleFunc("GET /api/v1/runtime/active", h.HandleRuntimeActive)
+	mux.HandleFunc("POST /api/v1/evm/build-eth-transfer", h.HandleBuildEthTransfer)
+	mux.HandleFunc("POST /api/v1/evm/broadcast-signed", h.HandleBroadcastSignedTx)
 
 	// ── JWT-protected endpoints ────────────────────────────────────────────────
 	mux.HandleFunc("POST /api/v1/keys", h.HandleKeysPost)

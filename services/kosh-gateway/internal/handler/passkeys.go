@@ -37,6 +37,7 @@ type pendingSession struct {
 type PasskeyStore struct {
 	mu          sync.Mutex
 	user        *passkeyUser
+	account     *session.Account
 	pendingRegs  map[string]*pendingSession  // registration_id → session
 	pendingAuths map[string]*pendingSession  // authentication_id → session
 	wauth       *webauthn.WebAuthn
@@ -164,11 +165,18 @@ func (s *PasskeyStore) HandleRegisterFinish(w http.ResponseWriter, r *http.Reque
 		label = pending.regBody.Label
 	}
 
-	acct := &session.Account{
-		AccountID:  newID(),
-		Label:      label,
-		LinkedKeys: []session.LinkedKey{},
+	s.mu.Lock()
+	if s.account == nil {
+		s.account = &session.Account{
+			AccountID:  newID(),
+			Label:      label,
+			LinkedKeys: []session.LinkedKey{},
+		}
+	} else if s.account.Label == "" || s.account.Label == "kosh" {
+		s.account.Label = label
 	}
+	acct := s.account
+	s.mu.Unlock()
 	tok, err := s.sessions.NewToken(acct)
 	if err != nil {
 		jsonError(w, "session error", http.StatusInternalServerError)
@@ -259,11 +267,16 @@ func (s *PasskeyStore) HandleAuthFinish(w http.ResponseWriter, r *http.Request) 
 	}
 	s.mu.Unlock()
 
-	acct := &session.Account{
-		AccountID:  newID(),
-		Label:      "kosh",
-		LinkedKeys: []session.LinkedKey{},
+	s.mu.Lock()
+	if s.account == nil {
+		s.account = &session.Account{
+			AccountID:  newID(),
+			Label:      "kosh",
+			LinkedKeys: []session.LinkedKey{},
+		}
 	}
+	acct := s.account
+	s.mu.Unlock()
 	tok, err := s.sessions.NewToken(acct)
 	if err != nil {
 		jsonError(w, "session error", http.StatusInternalServerError)

@@ -2,15 +2,7 @@
  * Local replacement for kosh-evm-client/browser.
  * Implements EVM transaction building, signing, and submission using viem.
  */
-import {
-  createPublicClient,
-  http,
-  keccak256,
-  toHex,
-  serializeTransaction,
-  type Hex,
-  type TransactionSerializableLegacy,
-} from "viem";
+import { createPublicClient, http, keccak256, toHex, serializeTransaction, type Hex, type TransactionSerializableLegacy } from "viem";
 import { sepolia } from "viem/chains";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -49,14 +41,50 @@ const sepoliaClient = createPublicClient({
 // ── buildEthTransfer ─────────────────────────────────────────────────────────
 
 export async function buildEthTransfer({
+  apiBaseUrl,
   from,
   to,
   value,
 }: {
+  apiBaseUrl?: string;
   from: Hex;
   to: Hex;
   value: bigint;
 }): Promise<UnsignedEthTransfer> {
+  if (apiBaseUrl) {
+    const resp = await fetch(`${apiBaseUrl}/api/v1/evm/build-eth-transfer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to, value: value.toString() }),
+    });
+    if (resp.ok) {
+      const body = (await resp.json()) as {
+        transaction?: {
+          to: Hex;
+          from: Hex;
+          value: string;
+          nonce: number;
+          gas: string;
+          gasPrice: string;
+          chainId: number;
+          data?: Hex;
+        };
+      };
+      if (body.transaction) {
+        return {
+          to: body.transaction.to,
+          from: body.transaction.from,
+          value: BigInt(body.transaction.value),
+          nonce: body.transaction.nonce,
+          gas: BigInt(body.transaction.gas),
+          gasPrice: BigInt(body.transaction.gasPrice),
+          chainId: body.transaction.chainId,
+          data: body.transaction.data,
+        };
+      }
+    }
+  }
+
   const [nonce, gasPrice, gas] = await Promise.all([
     sepoliaClient.getTransactionCount({ address: from }),
     sepoliaClient.getGasPrice(),
@@ -130,7 +158,18 @@ export function signTransaction(
 
 // ── submitSignedTransaction ───────────────────────────────────────────────────
 
-export async function submitSignedTransaction(signedTx: Hex): Promise<Hex> {
+export async function submitSignedTransaction(signedTx: Hex, apiBaseUrl?: string): Promise<Hex> {
+  if (apiBaseUrl) {
+    const resp = await fetch(`${apiBaseUrl}/api/v1/evm/broadcast-signed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signed_tx_hex: signedTx }),
+    });
+    if (resp.ok) {
+      const body = (await resp.json()) as { tx_hash?: Hex };
+      if (body.tx_hash) return body.tx_hash;
+    }
+  }
   return sepoliaClient.sendRawTransaction({ serializedTransaction: signedTx });
 }
 

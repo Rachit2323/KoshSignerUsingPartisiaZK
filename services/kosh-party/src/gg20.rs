@@ -248,6 +248,71 @@ pub fn reconstruct_signature(
     let mut sig = [0u8; 65];
     sig[..32].copy_from_slice(r.to_bytes().as_slice());
     sig[32..64].copy_from_slice(s.to_bytes().as_slice());
-    sig[64] = 27; // recovery id (simplified — real impl computes from R.y)
+    sig[64] = 27;
     sig
+}
+
+/// Local (no-Partisia) threshold signing finalization.
+/// Reads all delta reveals already posted to BB by round2, computes R, exchanges
+/// partial signatures via BB, combines them, and returns a 65-byte ECDSA signature.
+pub async fn local_sign_finalize(
+    bb: &mut BulletinBoard,
+    state: &Gg20State,
+    k_i: Scalar,
+    delta_i: Scalar,
+    sigma_i: Scalar,
+    all_gammas: &[ProjectivePoint], // from round1, one per signing party in order
+    message_hash: &[u8; 32],
+) -> Result<[u8; 65]> {
+    use k256::elliptic_curve::{ff::PrimeField, group::GroupEncoding, sec1::ToEncodedPoint};
+
+    // ── 1. Collect all delta_i reveals from BB (already posted by round2) ────
+    let mut delta_sum = delta_i;
+    for &j in &state.signing_subset {
+        if j == state.party_index { continue; }
+        let t = format!("gg20_delta_reveal_{}_{}_party_{j}", state.key_id, state.task_id);
+        let raw = bb.watch_one(&t, PHASE_TIMEOUT).await?;
+        let v: serde_json::Value = serde_json::from_str(&raw)?;
+        let dj = scalar_from_hex(v["delta"].as_str().unwrap_or(""))?;
+        delta_sum = delta_sum + dj;
+    }
+
+    // ── 2. Compute R = delta_sum^{-1} · sum(Gamma_i) ─────────────────────────
+    let gamma_sum = all_gammas.iter().fold(ProjectivePoint::IDENTITY, |acc, g| acc + g);
+    let delta_inv = Option::<Scalar>::from(delta_sum.invert())
+        .ok_or_else(|| anyhow::anyhow!("delta sum is zero"))?;
+    let big_r = gamma_sum * delta_inv;
+    let big_r_affine = big_r.to_affine();
+    let big_r_encoded = big_r_affine.to_encoded_point(false); // uncompressed
+    let r_bytes = &big_r_encoded.as_bytes()[1..33]; // x coordinate
+    let r = scalar_from_bytes_mod_n(r_bytes);
+
+    // recovery id: 0 if R.y is even, 1 if R.y is odd
+    let r_y_byte = big_r_encoded.as_bytes()[64]; // last byte of y
+    let recovery_id: u8 = r_y_byte & 1; // 0 = even, 1 = odd
+
+    // ── 3. Compute own partial sig s_i = k_i^{-1} * (m + r * sigma_i) ───────
+    let s_i = compute_partial_sig(&k_i, &sigma_i, message_hash, &r)?;
+
+    // ── 4. Exchange partial sigs via BB ───────────────────────────────────────
+    let my_topic = format!("gg20_psig_{}_{}_party_{}", state.key_id, state.task_id, state.party_index);
+    bb.post(&my_topic, &scalar_to_hex(&s_i)).await?;
+
+    let mut s_sum = s_i;
+    for &j in &state.signing_subset {
+        if j == state.party_index { continue; }
+        let t = format!("gg20_psig_{}_{}_party_{j}", state.key_id, state.task_id);
+        let raw = bb.watch_one(&t, PHASE_TIMEOUT).await?;
+        let sj = scalar_from_hex(&raw)?;
+        s_sum = s_sum + sj;
+    }
+
+    // ── 5. Build 65-byte signature [r(32) | s(32) | v(1)] ───────────────────
+    let mut sig = [0u8; 65];
+    sig[..32].copy_from_slice(r.to_bytes().as_slice());
+    sig[32..64].copy_from_slice(s_sum.to_bytes().as_slice());
+    sig[64] = recovery_id;
+    tracing::info!("[party {}] local GG20 signing complete: r={} recovery_id={recovery_id}",
+        state.party_index, hex::encode(&sig[..32]));
+    Ok(sig)
 }

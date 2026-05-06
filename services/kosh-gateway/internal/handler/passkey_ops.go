@@ -188,6 +188,19 @@ func (h *Handler) HandlePasskeysReuseSign(w http.ResponseWriter, r *http.Request
 	selectedEvmAddress := account.SelectedKey.EvmAddress
 	selectedPk := account.SelectedKey.CombinedPkHex
 
+	if h.clients.Coord != nil {
+		req := bbReq(fmt.Sprintf("dkg_complete_%d", selectedKeyID))
+		resp, err := h.clients.Coord.Read(r.Context(), &req)
+		if err != nil {
+			jsonError(w, "failed to verify local key runtime: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !resp.Found {
+			jsonError(w, "selected key is not loaded on this backend anymore; create or load it again first", http.StatusBadRequest)
+			return
+		}
+	}
+
 	job := h.jobs.Create(newID(), "sign")
 
 	go func() {

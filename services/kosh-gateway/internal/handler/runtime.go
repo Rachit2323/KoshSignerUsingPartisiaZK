@@ -29,6 +29,15 @@ func (h *Handler) HandlePreflight(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	canCreate := ready
+	canSign := ready && keyExists
+	message := ""
+	if !ready {
+		message = "Local signing services are not fully available."
+	} else if !keyExists && mode == "sign" {
+		message = "Key is not loaded on this backend. Create it again on this backend first."
+	}
+
 	json.NewEncoder(w).Encode(map[string]any{
 		"preflight": map[string]any{
 			"ok":                    ready,
@@ -39,9 +48,9 @@ func (h *Handler) HandlePreflight(w http.ResponseWriter, r *http.Request) {
 			"sender_gas_ok":         true,
 			"local_runtime_present": true,
 			"key_exists_onchain":    keyExists,
-			"can_create":            ready,
-			"can_sign":              ready && keyExists,
-			"message":               "",
+			"can_create":            canCreate,
+			"can_sign":              canSign,
+			"message":               message,
 			"checked_at":            time.Now().UTC().Format(time.RFC3339),
 		},
 	})

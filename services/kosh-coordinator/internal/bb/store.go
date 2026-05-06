@@ -65,12 +65,19 @@ func (s *Store) Unsubscribe(topic string, ch chan string) {
 	}
 }
 
-// Clear wipes all data. Returns number of keys removed.
+// Clear wipes all data AND closes all subscriber channels so stale Watch
+// goroutines exit. Returns number of keys removed.
 func (s *Store) Clear() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := len(s.data)
 	s.data = make(map[string]string)
+	for _, chans := range s.subs {
+		for _, ch := range chans {
+			close(ch)
+		}
+	}
+	s.subs = make(map[string][]chan string)
 	return n
 }
 

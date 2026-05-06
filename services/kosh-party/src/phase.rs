@@ -49,8 +49,9 @@ pub async fn run_dkg(
         let _ = tx.try_send(Ok(DkgEvent { phase: phase as i32, message: msg }));
     };
 
+    let on_chain = !cfg.signer_address.is_empty();
     send(DkgPhase::DkgStart, format!(
-        "DKG key={key_id} party={} on_chain=true", cfg.party_index
+        "DKG key={key_id} party={} on_chain={on_chain}", cfg.party_index
     ));
 
     let mut bb = BulletinBoard::connect(&cfg.coordinator_addr).await?;
@@ -73,6 +74,23 @@ pub async fn run_dkg(
 
     // ── Phase 4: on-chain DKG ceremony via Partisia ZK nodes ─────────────────
     use k256::elliptic_curve::group::GroupEncoding;
+
+    if !on_chain {
+        // Local-only mode: skip all Partisia on-chain submissions.
+        send(DkgPhase::DkgZkSubmitted, "ZK share halves submitted (simulated)".into());
+        let store = ShareStore::new(&cfg.keystore_dir, &cfg.keystore_master_key)?;
+        store.save(&PersistedShare {
+            contract_address: cfg.signer_address.clone(),
+            key_id,
+            party_index: cfg.party_index as u8,
+            public_key_hex: combined_pk_hex.clone(),
+            shamir_share_hex: dkg::scalar_to_hex(&x_i),
+            next_task_id: 1,
+            runtime_version: "kosh-party-v1".into(),
+        })?;
+        send(DkgPhase::DkgComplete, format!("combined_pk={combined_pk_hex}"));
+        return Ok(());
+    }
 
     let mut relay = ChainRelayClient::connect(&cfg.chain_relay_addr).await?;
     let contract = &cfg.signer_address;
@@ -214,13 +232,16 @@ pub async fn run_sign(
         anyhow::bail!("x_i_override is no longer supported; signing must use persisted encrypted shares");
     }
 
+    let on_chain = !cfg.signer_address.is_empty();
+
     // ── Load key share from encrypted disk persistence ───────────────────────
     let x_i = if let Some(xi) = x_i_override {
         xi
     } else {
+        // For local mode the contract_address was saved as empty string
+        let contract_key = if on_chain { cfg.signer_address.as_str() } else { "" };
         let store = ShareStore::new(&cfg.keystore_dir, &cfg.keystore_master_key)?;
-        let persisted = store.load(&cfg.signer_address, key_id, cfg.party_index as u8)?;
-        // Apply Lagrange coefficient for threshold signing
+        let persisted = store.load(contract_key, key_id, cfg.party_index as u8)?;
         let subset_u8: Vec<u8> = signing_subset.iter().map(|&p| p as u8).collect();
         apply_lagrange(&persisted.shamir_share_hex, cfg.party_index as u8, &subset_u8)?
     };
@@ -231,7 +252,7 @@ pub async fn run_sign(
     );
 
     // ── GG20 Round 1: k_i, gamma_i, Gamma_i ──────────────────────────────────
-    let (k_i, gamma_i, big_gamma_i, _all_gammas) =
+    let (k_i, gamma_i, big_gamma_i, all_gammas) =
         gg20::round1(&mut bb, &state, x_i).await?;
     state.k_i = Some(k_i);
     state.gamma_i = Some(gamma_i);
@@ -245,6 +266,15 @@ pub async fn run_sign(
     state.sigma_i = Some(sigma_i);
     send(SignPhase::MtaComplete, "MtA complete".into(), vec![]);
     send(SignPhase::Gg20Round2, "Round 2 complete".into(), vec![]);
+
+    // ── Local signing path (no Partisia on-chain) ─────────────────────────────
+    if !on_chain {
+        let sig = gg20::local_sign_finalize(
+            &mut bb, &state, k_i, delta_i, sigma_i, &all_gammas, &message_hash,
+        ).await?;
+        send(SignPhase::SignComplete, "local threshold ECDSA signature complete".into(), sig.to_vec());
+        return Ok(());
+    }
 
     // ── PQC Approval (required before gg20_start_signing on-chain) ───────────
     send(SignPhase::PqcApproved, "PQC approval submitted".into(), vec![]);
