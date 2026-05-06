@@ -11,7 +11,7 @@ BACKEND_ADDR="127.0.0.1:${BACKEND_PORT}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 KEYSTORE_ROOT_DIR="${KOSH_KEYSTORE_ROOT_DIR:-/tmp/kosh-rust-backend-live}"
 KOSH_KEYSTORE_MASTER_KEY="${KOSH_KEYSTORE_MASTER_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}"
-PARTISIA_NODE_URL="${PARTISIA_NODE_URL:-https://node1.testnet.partisiablockchain.com,https://node2.testnet.partisiablockchain.com,https://node3.testnet.partisiablockchain.com,https://node4.testnet.partisiablockchain.com}"
+PARTISIA_NODE_URLS="${PARTISIA_NODE_URLS:-${PARTISIA_NODE_URL:-https://node1.testnet.partisiablockchain.com,https://node2.testnet.partisiablockchain.com,https://node3.testnet.partisiablockchain.com,https://node4.testnet.partisiablockchain.com}}"
 PARTISIA_SENDER_KEY="${PARTISIA_SENDER_KEY:-cea538ce0bc3b7f4bcbb3bbea6eb2d26d76c9ddeab77938128ffb46828d42822}"
 PARTISIA_SENDER_ADDRESS="${PARTISIA_SENDER_ADDRESS:-0070df8630bd853487c025e6e2b0eac733aa79481d}"
 MSG_HASH_HEX="${MSG_HASH_HEX:-0xc9b03991a1a3fa025eebe1fe2c9186e0a4d1b275f5eb8369e4f4429416655735}"
@@ -127,7 +127,7 @@ fi
 export KOSH_BACKEND_BIND_ADDR="$BACKEND_ADDR"
 export KOSH_KEYSTORE_ROOT_DIR
 export KOSH_KEYSTORE_MASTER_KEY
-export PARTISIA_NODE_URL
+export PARTISIA_NODE_URLS
 export PARTISIA_SENDER_KEY
 export PARTISIA_SENDER_ADDRESS
 export KOSH_SEPOLIA_RPC_URL="$SEPOLIA_RPC_URL"

@@ -21,6 +21,11 @@ export type BrowserThresholdKeyStatus = {
   phase: number;
   combined_pk_hex?: string;
   evm_address?: string;
+  // camelCase aliases populated after load
+  evmAddress?: string;
+  publicKeyHex?: string;
+  keygenPhaseDiscriminant?: number;
+  verifiedTaskIds: (string | number)[];
 };
 
 export type UnsignedEthTransfer = {

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	party_pb "github.com/kosh/gateway/pb/party"
+	bb_pb "github.com/kosh/gateway/pb/bb"
 )
 
 type DkgRequest struct {
@@ -109,6 +110,13 @@ func (h *Handler) HandleKeysPost(w http.ResponseWriter, r *http.Request) {
 				combinedPk = msg
 			}
 		}
+	}
+
+	if h.clients.Coord != nil && combinedPk != "" {
+		_, _ = h.clients.Coord.Post(ctx, &bb_pb.PostRequest{
+			Topic: fmt.Sprintf("dkg_complete_%d", req.KeyID),
+			Value: fmt.Sprintf("combined_pk=%s", combinedPk),
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

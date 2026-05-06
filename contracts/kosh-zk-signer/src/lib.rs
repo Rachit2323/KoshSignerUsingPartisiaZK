@@ -17,6 +17,11 @@ extern crate pbc_lib as _;
 
 pub mod dkg;
 pub mod signing_state;
+#[cfg(test)]
+#[path = "zk_compute_model.rs"]
+pub(crate) mod zk_compute;
+#[cfg(test)]
+mod zk_compute_tests;
 
 use create_type_spec_derive::CreateTypeSpec;
 use k256::ecdsa::signature::hazmat::PrehashVerifier;

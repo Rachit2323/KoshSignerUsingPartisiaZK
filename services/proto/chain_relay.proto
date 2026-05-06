@@ -4,6 +4,7 @@ option go_package = "github.com/kosh/relay/pb";
 
 service ChainRelay {
   rpc Submit(SubmitRequest)                     returns (stream TxEvent);
+  rpc SubmitZkInput(SubmitZkInputRequest)      returns (stream TxEvent);
   rpc GetContractState(GetContractStateRequest) returns (GetContractStateResponse);
 }
 
@@ -13,6 +14,15 @@ message SubmitRequest {
   uint32 shortname         = 3;
   bytes  args              = 4;
   string label             = 5;
+}
+
+message SubmitZkInputRequest {
+  uint32 party_index       = 1;
+  string contract_address  = 2;
+  uint32 shortname         = 3;
+  bytes  public_args       = 4;
+  bytes  secret_input      = 5;
+  string label             = 6;
 }
 
 message TxEvent {

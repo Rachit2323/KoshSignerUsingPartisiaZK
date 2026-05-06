@@ -30,18 +30,20 @@ func (h *Handler) HandlePreflight(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"ok":                    ready,
-		"backend_reachable":     true,
-		"relay_configured":      coordOnline,
-		"sender_address":        "",
-		"sender_gas_balance":    "0",
-		"sender_gas_ok":         true,
-		"local_runtime_present": true,
-		"key_exists_onchain":    keyExists,
-		"can_create":            ready,
-		"can_sign":              ready && keyExists,
-		"message":               "",
-		"checked_at":            time.Now().UTC().Format(time.RFC3339),
+		"preflight": map[string]any{
+			"ok":                    ready,
+			"backend_reachable":     true,
+			"relay_configured":      coordOnline,
+			"sender_address":        "",
+			"sender_gas_balance":    "0",
+			"sender_gas_ok":         true,
+			"local_runtime_present": true,
+			"key_exists_onchain":    keyExists,
+			"can_create":            ready,
+			"can_sign":              ready && keyExists,
+			"message":               "",
+			"checked_at":            time.Now().UTC().Format(time.RFC3339),
+		},
 	})
 }
 

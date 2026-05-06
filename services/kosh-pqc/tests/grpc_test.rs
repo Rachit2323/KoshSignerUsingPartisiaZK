@@ -43,6 +43,10 @@ fn start_pqc(port: u16) -> Guard {
     let proc = Command::new(bin)
         .env("PORT", port.to_string())
         .env("PQC_KEY_FILE", &pqc_file)
+        .env(
+            "PQC_KEY_FILE_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
         .env("RUST_LOG", "error")
         .spawn()
         .expect("failed to start kosh-pqc");

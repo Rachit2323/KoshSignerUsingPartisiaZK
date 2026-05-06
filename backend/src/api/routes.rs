@@ -161,7 +161,15 @@ async fn passkey_create_key(
     )
     .await;
     let _ = token;
-    (StatusCode::CREATED, Json(CreateJobResponse { job })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            job,
+            contract_address: Some(payload.contract_address),
+            key_id: Some(key_id),
+        }),
+    )
+        .into_response()
 }
 
 async fn passkey_reuse_sign(
@@ -177,11 +185,13 @@ async fn passkey_reuse_sign(
         Ok(linked) => linked,
         Err(err) => return (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
     };
+    let contract_address = linked.contract_address.clone();
+    let key_id = linked.key_id;
     let job = orchestrator::start_reuse_sign_v2_workflow(
         state,
         crate::orchestrator::ReuseSignWorkflowRequest {
-            contract_address: linked.contract_address,
-            key_id: linked.key_id,
+            contract_address,
+            key_id,
             tx_tag: payload.tx_tag,
             signing_parties: payload.signing_parties,
             threshold: payload.threshold,
@@ -191,7 +201,15 @@ async fn passkey_reuse_sign(
         },
     )
     .await;
-    (StatusCode::CREATED, Json(CreateJobResponse { job })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            job,
+            contract_address: Some(linked.contract_address),
+            key_id: Some(linked.key_id),
+        }),
+    )
+        .into_response()
 }
 
 async fn passkey_register_start(
@@ -434,7 +452,14 @@ async fn create_job(
     Json(payload): Json<CreateJobRequest>,
 ) -> impl IntoResponse {
     let job = state.jobs.create_job(payload.kind.into()).await;
-    (StatusCode::CREATED, Json(CreateJobResponse { job }))
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            job,
+            contract_address: None,
+            key_id: None,
+        }),
+    )
 }
 
 async fn get_job(State(state): State<AppState>, Path(job_id): Path<Uuid>) -> impl IntoResponse {
@@ -933,24 +958,54 @@ async fn start_create_key_workflow(
     State(state): State<AppState>,
     Json(payload): Json<StartCreateKeyWorkflowRequest>,
 ) -> impl IntoResponse {
+    let contract_address = payload.contract_address.clone();
+    let key_id = payload.key_id;
     let job = orchestrator::start_create_key_workflow(state, payload).await;
-    (StatusCode::CREATED, Json(CreateJobResponse { job })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            key_id: Some(key_id),
+            contract_address: Some(contract_address),
+            job,
+        }),
+    )
+        .into_response()
 }
 
 async fn start_reuse_sign_workflow(
     State(state): State<AppState>,
     Json(payload): Json<StartReuseSignWorkflowRequest>,
 ) -> impl IntoResponse {
+    let contract_address = payload.contract_address.clone();
+    let key_id = payload.key_id;
     let job = orchestrator::start_reuse_sign_workflow(state, payload).await;
-    (StatusCode::CREATED, Json(CreateJobResponse { job })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            key_id: Some(key_id),
+            contract_address: Some(contract_address),
+            job,
+        }),
+    )
+        .into_response()
 }
 
 async fn start_reuse_sign_v2_workflow(
     State(state): State<AppState>,
     Json(payload): Json<StartReuseSignWorkflowRequest>,
 ) -> impl IntoResponse {
+    let contract_address = payload.contract_address.clone();
+    let key_id = payload.key_id;
     let job = orchestrator::start_reuse_sign_v2_workflow(state, payload).await;
-    (StatusCode::CREATED, Json(CreateJobResponse { job })).into_response()
+    (
+        StatusCode::CREATED,
+        Json(CreateJobResponse {
+            key_id: Some(key_id),
+            contract_address: Some(contract_address),
+            job,
+        }),
+    )
+        .into_response()
 }
 
 async fn build_eth_transfer(

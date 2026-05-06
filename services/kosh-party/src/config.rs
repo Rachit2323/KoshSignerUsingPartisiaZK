@@ -24,7 +24,7 @@ impl Config {
         if party_index == 0 {
             bail!("PARTY_INDEX must be >= 1");
         }
-        Ok(Self {
+        let cfg = Self {
             port: std::env::var("PORT").unwrap_or_else(|_| "50060".into()).parse()?,
             party_index,
             num_parties: std::env::var("NUM_PARTIES").unwrap_or_else(|_| "3".into()).parse()?,
@@ -40,6 +40,15 @@ impl Config {
             keystore_dir: std::env::var("KEYSTORE_DIR")
                 .unwrap_or_else(|_| ".kosh-shares".into()),
             keystore_master_key: std::env::var("KEYSTORE_MASTER_KEY").unwrap_or_default(),
-        })
+        };
+
+        if cfg.signer_address.is_empty() {
+            bail!("SIGNER_ADDRESS is required; local signing fallback has been removed");
+        }
+        if cfg.keystore_dir.is_empty() || cfg.keystore_master_key.is_empty() {
+            bail!("KEYSTORE_DIR and KEYSTORE_MASTER_KEY are required; in-memory share fallback has been removed");
+        }
+
+        Ok(cfg)
     }
 }

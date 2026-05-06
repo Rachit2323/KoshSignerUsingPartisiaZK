@@ -46,6 +46,10 @@ impl From<JobKindDto> for JobKind {
 #[derive(Debug, Serialize)]
 pub struct CreateJobResponse {
     pub job: Job,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

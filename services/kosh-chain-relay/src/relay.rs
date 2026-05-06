@@ -5,10 +5,10 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use k256::ecdsa::{RecoveryId, Signature, SigningKey};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
 const NODE_FAILURE_COOLDOWN_MS: i64 = 10_000;
@@ -39,26 +39,29 @@ impl ChainRelay {
 
     pub fn from_env() -> Result<Self> {
         let urls_raw = std::env::var("PARTISIA_NODE_URLS")
-            .unwrap_or_else(|_| "https://node1.testnet.partisiablockchain.com".to_string());
-        let node_urls: Vec<String> = urls_raw.split(',').map(|s| s.trim().to_string()).collect();
+            .context("PARTISIA_NODE_URLS is required and must list the 4 Partisia nodes explicitly")?;
+        let node_urls: Vec<String> = urls_raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if node_urls.len() < 4 {
+            return Err(anyhow!(
+                "PARTISIA_NODE_URLS must contain all 4 Partisia nodes; got {}",
+                node_urls.len()
+            ));
+        }
 
         let mut parties = HashMap::new();
-        for idx in 1u32..=10 {
+        for idx in 1u32..=3 {
             let key_env = format!("PARTISIA_SENDER_KEY_{idx}");
             let addr_env = format!("PARTISIA_SENDER_ADDRESS_{idx}");
-            if let (Ok(key), Ok(addr)) = (std::env::var(&key_env), std::env::var(&addr_env)) {
-                parties.insert(idx, (addr, key));
+            let key = std::env::var(&key_env)
+                .with_context(|| format!("{key_env} is required; relay no longer falls back to shared sender credentials"))?;
+            let addr = std::env::var(&addr_env)
+                .with_context(|| format!("{addr_env} is required; relay no longer falls back to shared sender credentials"))?;
+            parties.insert(idx, (addr, key));
             }
-        }
-        // Fallback: single party from PARTISIA_SENDER_KEY / PARTISIA_SENDER_ADDRESS
-        if parties.is_empty() {
-            if let (Ok(key), Ok(addr)) = (
-                std::env::var("PARTISIA_SENDER_KEY"),
-                std::env::var("PARTISIA_SENDER_ADDRESS"),
-            ) {
-                parties.insert(1, (addr, key));
-            }
-        }
 
         Ok(Self::new(node_urls, parties))
     }
@@ -136,6 +139,71 @@ impl ChainRelay {
         })
     }
 
+    pub async fn submit_zk_input(
+        &self,
+        party_index: u32,
+        contract_address: &str,
+        shortname: u8,
+        public_args: &[u8],
+        secret_input: &[u8],
+        label: &str,
+    ) -> Result<String> {
+        let (sender_address, sender_key) = self
+            .parties
+            .get(&party_index)
+            .ok_or_else(|| anyhow!("no key configured for party {party_index}"))?
+            .clone();
+
+        let mut rpc = vec![0x09u8, shortname];
+        rpc.extend_from_slice(public_args);
+
+        let request = serde_json::json!({
+            "nodeUrls": self.node_urls,
+            "senderKey": sender_key,
+            "senderAddress": sender_address,
+            "contractAddress": contract_address,
+            "publicRpcHex": hex::encode(rpc),
+            "secretHex": hex::encode(secret_input),
+            "gasCost": 750000,
+            "maxRetries": self.node_urls.len(),
+        });
+
+        let helper = zk_input_helper_path()?;
+        let mut child = tokio::process::Command::new("node")
+            .arg(helper)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn Partisia ZK input helper")?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(&serde_json::to_vec(&request)?).await?;
+        }
+
+        let output = child.wait_with_output().await?;
+        if output.status.success() {
+            let response: Value = serde_json::from_slice(&output.stdout)
+                .context("decode zk helper stdout")?;
+            let tx_hash = response
+                .get("txHash")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("zk helper did not return txHash"))?;
+            tracing::info!("{label} submitted zk tx={tx_hash}");
+            Ok(tx_hash.to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let msg = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            Err(anyhow!("zk input helper failed: {msg}"))
+        }
+    }
+
     async fn pick_node(&self) -> String {
         let mut cursor = self.node_cursor.lock().await;
         let node = self.node_urls[*cursor % self.node_urls.len()].clone();
@@ -161,6 +229,15 @@ impl ChainRelay {
         cache.insert(party, (chain_id.clone(), nonce + 1));
         Ok((chain_id, nonce))
     }
+}
+
+fn zk_input_helper_path() -> Result<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow!("cannot derive repo root from manifest dir"))?;
+    Ok(repo_root.join("frontend/scripts/submit-partisia-zk-input.mjs"))
 }
 
 // ─── Signing helpers (ported from backend/src/chain_relay/mod.rs) ────────────

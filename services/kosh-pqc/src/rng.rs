@@ -24,7 +24,7 @@ impl TryRng for SystemRng {
 }
 impl TryCryptoRng for SystemRng {}
 
-fn fill(buf: &mut [u8]) {
+pub fn fill(buf: &mut [u8]) {
     std::fs::File::open("/dev/urandom")
         .expect("cannot open /dev/urandom")
         .read_exact(buf)

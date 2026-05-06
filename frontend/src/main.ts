@@ -95,7 +95,7 @@ type AppState = {
 };
 
 const storageKey = "kosh-frontend-threshold-state-v4";
-const defaultContractAddress = "03d69b9a696147c8545aa580b2e528e69928d171e5";
+const defaultContractAddress = "031fb3ede8b7274ffb94ef250ba3747e49b2706d12";
 const defaultKeyId = 63001;
 const defaultRecipient = "0xb0538910f0Abffc41F0CF701E626975E51e92bC7" as Hex;
 const defaultApiBaseUrl = "http://127.0.0.1:8080";
@@ -126,6 +126,10 @@ const app = document.querySelector<HTMLDivElement>("#app")!;
 if (!app) throw new Error("Missing #app");
 
 let pollTimer: number | null = null;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 function load(key: string, fallback: string): string {
   const raw = localStorage.getItem(storageKey);
@@ -241,7 +245,19 @@ function authenticationToJson(credential: PublicKeyCredential): Record<string, u
 async function passkeyFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers ?? {});
   if (state.passkeySessionToken) headers.set("x-kosh-session", state.passkeySessionToken);
-  return fetch(`${baseUrl()}${path}`, { ...init, headers });
+  const resp = await fetch(`${baseUrl()}${path}`, { ...init, headers });
+  // Session expired (server restarted) — clear stale token so UI shows sign-in buttons
+  if (resp.status === 401 || resp.status === 403) {
+    const clone = resp.clone();
+    const body = await clone.json().catch(() => ({})) as Record<string, unknown>;
+    if (typeof body.error === "string" && body.error.includes("session")) {
+      state.passkeySessionToken = null;
+      state.passkeyAccount = null;
+      persist();
+      throw new Error("Session expired — please sign in with your passkey again.");
+    }
+  }
+  return resp;
 }
 
 function nextSessionId(): number {
@@ -338,6 +354,32 @@ function normalizeJob(job: Record<string, unknown>): JobRecord {
     createdEvmAddress: typeof result?.evm_address === "string" ? String(result.evm_address) : null,
     createdPublicKeyHex: typeof result?.public_key_hex === "string" ? String(result.public_key_hex) : null,
   };
+}
+
+function normalizeThresholdStatus(raw: BrowserThresholdKeyStatus): BrowserThresholdKeyStatus {
+  const status = { ...raw } as BrowserThresholdKeyStatus & {
+    public_key_hex?: string;
+    combined_pk_hex?: string;
+    verified_task_ids?: (string | number)[];
+    keygen_phase_discriminant?: number;
+  };
+  status.evmAddress = status.evmAddress ?? status.evm_address;
+  status.publicKeyHex = status.publicKeyHex ?? status.public_key_hex ?? status.combined_pk_hex;
+  status.keygenPhaseDiscriminant =
+    status.keygenPhaseDiscriminant ?? status.keygen_phase_discriminant;
+  status.verifiedTaskIds = status.verifiedTaskIds ?? status.verified_task_ids ?? [];
+  return status;
+}
+
+function applyCreatedKeyResult(job: JobRecord): void {
+  state.status = normalizeThresholdStatus({
+    key_id: state.keyId,
+    exists: true,
+    evm_address: job.createdEvmAddress ?? undefined,
+    public_key_hex: job.createdPublicKeyHex ?? undefined,
+    verifiedTaskIds: [],
+    phase: 0,
+  } as BrowserThresholdKeyStatus);
 }
 
 async function refreshPasskeyMe(): Promise<void> {
@@ -462,10 +504,18 @@ async function maybeLinkCreatedKeyToPasskey(): Promise<void> {
   }
 }
 
+async function syncSelectedPasskeyKey(): Promise<void> {
+  const selected = state.passkeyAccount?.selected_key ?? null;
+  if (!selected) return;
+  state.signerAddress = selected.contract_address;
+  state.keyId = selected.key_id;
+  persist();
+}
+
 async function handleLoadKey(): Promise<void> {
   try {
     await ensureBackendAvailable();
-    if (!state.passkeyAccount?.selected_key && state.mode === "existing") throw new Error("Sign in with a passkey and select a linked key first.");
+    if (!state.signerAddress || !state.keyId) throw new Error("Enter a contract address and key ID first.");
     setError(null);
     const statusResp = await fetch(
       `${baseUrl()}/api/v1/threshold/key-status?contract_address=${encodeURIComponent(state.signerAddress)}&key_id=${state.keyId}`,
@@ -477,9 +527,10 @@ async function handleLoadKey(): Promise<void> {
       return;
     }
     if (!statusResp.ok) throw new Error(`Backend error: ${statusResp.status}`);
-    state.status = (await statusResp.json()) as BrowserThresholdKeyStatus;
+    const raw = (await statusResp.json()) as BrowserThresholdKeyStatus;
+    state.status = normalizeThresholdStatus(raw);
     state.latestVerifiedTaskId = state.status.verifiedTaskIds.length
-      ? state.status.verifiedTaskIds[state.status.verifiedTaskIds.length - 1]
+      ? Number(state.status.verifiedTaskIds[state.status.verifiedTaskIds.length - 1])
       : null;
     state.latestSignatureHex = null;
     state.latestSepoliaTxHash = null;
@@ -506,6 +557,19 @@ async function handleLoadKey(): Promise<void> {
   }
 }
 
+async function waitForCreatedKey(maxAttempts = 10, delayMs = 1500): Promise<boolean> {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      await handleLoadKey();
+      if (state.status?.exists) return true;
+    } catch {
+      // Let retries handle eventual contract-state visibility.
+    }
+    await sleep(delayMs);
+  }
+  return Boolean(state.status?.exists);
+}
+
 async function handleCreateKey(): Promise<void> {
   try {
     setError(null);
@@ -520,13 +584,21 @@ async function handleCreateKey(): Promise<void> {
         num_parties: state.numParties,
       }),
     });
-    const body = (await parseApiBody(resp)) as { job?: Record<string, unknown>; error?: string } | null;
+    const body = (await parseApiBody(resp)) as {
+      job?: Record<string, unknown>;
+      error?: string;
+      key_id?: number;
+      contract_address?: string;
+    } | null;
     if (!resp.ok || !body?.job) throw new Error(body && typeof body === "object" && "error" in body && typeof body.error === "string" ? body.error : `Create-key failed: ${resp.status}`);
+    if (typeof body.key_id === "number") state.keyId = body.key_id;
+    if (typeof body.contract_address === "string") state.signerAddress = body.contract_address;
     state.currentJob = normalizeJob(body.job);
     state.latestSepoliaTxHash = null;
     state.signingHash = null;
     state.txPreview = null;
     state.unsignedTx = null;
+    persist();
     render();
     pollJob();
   } catch (err) {
@@ -542,7 +614,7 @@ async function handleBuildTx(): Promise<void> {
     state.currentJob = null;
     state.latestSepoliaTxHash = null;
     const tx = await buildEthTransfer({
-      from: state.status.evmAddress,
+      from: state.status.evmAddress as `0x${string}`,
       to: state.recipient,
       value: BigInt(state.amountWei),
     });
@@ -590,7 +662,7 @@ async function handleStartSigning(): Promise<void> {
       keyId: state.keyId,
       signingHash: state.signingHash!,
       unsignedTx: state.unsignedTx!,
-      evmAddress: state.status!.evmAddress!,
+      evmAddress: state.status!.evmAddress! as `0x${string}`,
     };
     render();
     pollJob();
@@ -612,8 +684,13 @@ async function refreshJob(): Promise<void> {
 
   if (state.currentJob.status === "completed") {
     if (state.mode === "create") {
-      await handleLoadKey();
+      if (typeof completedJob.activeKeyId === "number") state.keyId = completedJob.activeKeyId;
+      if (completedJob.activeContractAddress) state.signerAddress = completedJob.activeContractAddress;
+      applyCreatedKeyResult(completedJob);
+      render();
+      await waitForCreatedKey();
       await maybeLinkCreatedKeyToPasskey();
+      await syncSelectedPasskeyKey();
       state.mode = "existing";
       persist();
       if (state.status?.evmAddress) {
@@ -633,7 +710,12 @@ async function refreshJob(): Promise<void> {
 async function finalizeSigningResult(completedJob: JobRecord): Promise<void> {
   const result = completedJob.result ?? null;
   const session = state.activeSignSession;
-  const signatureHex = typeof result?.onchain_signature_hex === "string" ? (result.onchain_signature_hex as Hex) : null;
+  const signatureHex =
+    typeof result?.onchain_signature_hex === "string"
+      ? (result.onchain_signature_hex as Hex)
+      : typeof result?.signature_hex === "string"
+        ? (result.signature_hex as Hex)
+        : null;
   if (!signatureHex || !session) {
     render();
     return;
@@ -791,7 +873,7 @@ function render(): void {
       ${keyInfoCard}
       ${state.currentJob && state.mode === "create" ? `
         <div class="section callout">
-          <div class="stat-label">Creating Key…</div>
+          <div class="stat-label">${state.currentJob.status === "failed" ? "Create Key Failed" : "Creating Key…"}</div>
           <div class="stat-value ${state.currentJob.status === "completed" ? "success" : state.currentJob.status === "failed" ? "danger" : ""}">
             ${escapeHtml(state.currentJob.phase)}
           </div>

@@ -12,7 +12,7 @@ mod relay_pb {
 
 use relay_pb::{
     chain_relay_client::ChainRelayClient as RelayGrpc,
-    GetContractStateRequest, SubmitRequest,
+    GetContractStateRequest, SubmitRequest, SubmitZkInputRequest,
     tx_event::Status as TxStatus,
 };
 
@@ -62,6 +62,44 @@ impl ChainRelayClient {
             }
         }
         Err(anyhow!("relay stream ended without confirmation"))
+    }
+
+    pub async fn submit_zk_input(
+        &mut self,
+        party_index: u32,
+        contract_addr: &str,
+        shortname: u8,
+        public_args: Vec<u8>,
+        secret_input: Vec<u8>,
+        label: &str,
+    ) -> Result<String> {
+        let req = SubmitZkInputRequest {
+            party_index,
+            contract_address: contract_addr.to_string(),
+            shortname: shortname as u32,
+            public_args,
+            secret_input,
+            label: label.to_string(),
+        };
+
+        let mut stream = self.inner.submit_zk_input(req).await?.into_inner();
+
+        while let Some(event) = stream.next().await {
+            let ev = event?;
+            match TxStatus::try_from(ev.status).unwrap_or(TxStatus::Queued) {
+                TxStatus::Confirmed => {
+                    tracing::info!("[relay] zk tx confirmed: {}", ev.tx_id);
+                    return Ok(ev.tx_id);
+                }
+                TxStatus::Failed => {
+                    return Err(anyhow!("zk tx failed: {}", ev.error));
+                }
+                _ => {
+                    tracing::debug!("[relay] zk tx status {:?}: {}", ev.status, ev.tx_id);
+                }
+            }
+        }
+        Err(anyhow!("relay zk stream ended without confirmation"))
     }
 
     /// Fetch and parse contract state JSON.

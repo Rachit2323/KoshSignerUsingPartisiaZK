@@ -50,9 +50,10 @@ func (h *Handler) HandleThresholdKeyStatus(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	if !resp.Found {
 		json.NewEncoder(w).Encode(map[string]any{
-			"key_id": keyID,
-			"exists": false,
-			"phase":  0,
+			"key_id":          keyID,
+			"exists":          false,
+			"phase":           0,
+			"verifiedTaskIds": []any{},
 		})
 		return
 	}
@@ -65,11 +66,12 @@ func (h *Handler) HandleThresholdKeyStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	json.NewEncoder(w).Encode(map[string]any{
-		"key_id":         keyID,
-		"exists":         true,
-		"phase":          4, // DKG_COMPLETE phase index
+		"key_id":          keyID,
+		"exists":          true,
+		"phase":           4,
 		"combined_pk_hex": combinedPk,
-		"evm_address":    deriveEvmAddress(combinedPk),
+		"evm_address":     deriveEvmAddress(combinedPk),
+		"verifiedTaskIds": []any{},
 	})
 }
 

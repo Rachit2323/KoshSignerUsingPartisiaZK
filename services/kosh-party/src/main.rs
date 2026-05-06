@@ -67,16 +67,13 @@ impl PartyService for PartyServiceImpl {
             .try_into()
             .map_err(|_| Status::invalid_argument("message_hash must be 32 bytes"))?;
 
-        // In a full impl, x_i would be fetched from keystore via gRPC.
-        // For the service skeleton, use a placeholder derived from party_index + key_id.
-        let x_i = derive_x_i_placeholder(cfg.party_index, r.key_id);
         let signing_subset: Vec<u32> = r.signing_subset.iter().map(|&x| x as u32).collect();
         let task_id = r.key_id; // simplified; real impl fetches from keystore
 
         tokio::spawn(async move {
             if let Err(e) = phase::run_sign(
                 &cfg, r.key_id, message_hash, r.tx_tag, signing_subset, task_id,
-                Some(x_i), // placeholder x_i; None = load from keystore
+                None, // load the persisted share instead of using a derived placeholder
                 tx.clone(),
             )
             .await
@@ -104,16 +101,6 @@ impl PartyService for PartyServiceImpl {
             active_key_ids: vec![],
         }))
     }
-}
-
-/// Deterministic x_i placeholder for testing without a running keystore.
-fn derive_x_i_placeholder(party_index: u32, key_id: u32) -> k256::Scalar {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(b"kosh-test-share");
-    h.update(party_index.to_le_bytes());
-    h.update(key_id.to_le_bytes());
-    dkg::scalar_from_bytes_mod_n(&h.finalize())
 }
 
 #[tokio::main]

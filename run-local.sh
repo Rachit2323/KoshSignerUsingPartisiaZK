@@ -10,6 +10,23 @@ echo "=== Starting KoshSigner locally ==="
 echo "    Press Ctrl+C to stop all processes."
 echo ""
 
+require_env() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "Missing required env: $name" >&2
+    exit 1
+  fi
+}
+
+require_env SIGNER_ADDRESS
+require_env PARTISIA_NODE_URLS
+require_env PARTISIA_SENDER_KEY_1
+require_env PARTISIA_SENDER_ADDRESS_1
+require_env PARTISIA_SENDER_KEY_2
+require_env PARTISIA_SENDER_ADDRESS_2
+require_env PARTISIA_SENDER_KEY_3
+require_env PARTISIA_SENDER_ADDRESS_3
+
 # ── Kill any leftover processes on our ports ──────────────────────────────────
 echo "Clearing old processes on ports 50051 50052 50060 50061 50062 8080 9090..."
 pkill -f "kosh-party" 2>/dev/null || true
@@ -75,9 +92,14 @@ if [ ! -f "$RELAY_BIN" ]; then
 fi
 
 echo "[5/9] kosh-chain-relay  (gRPC :50053)"
-SIGNER_ADDRESS="${SIGNER_ADDRESS:-03a1e8aba3ba45c1e42d01f688768436cb2b572de0}" \
-PARTISIA_SENDER_KEY="${PARTISIA_SENDER_KEY:-}" \
-PARTISIA_SENDER_ADDRESS="${PARTISIA_SENDER_ADDRESS:-}" \
+SIGNER_ADDRESS="$SIGNER_ADDRESS" \
+PARTISIA_NODE_URLS="$PARTISIA_NODE_URLS" \
+PARTISIA_SENDER_KEY_1="$PARTISIA_SENDER_KEY_1" \
+PARTISIA_SENDER_ADDRESS_1="$PARTISIA_SENDER_ADDRESS_1" \
+PARTISIA_SENDER_KEY_2="$PARTISIA_SENDER_KEY_2" \
+PARTISIA_SENDER_ADDRESS_2="$PARTISIA_SENDER_ADDRESS_2" \
+PARTISIA_SENDER_KEY_3="$PARTISIA_SENDER_KEY_3" \
+PARTISIA_SENDER_ADDRESS_3="$PARTISIA_SENDER_ADDRESS_3" \
 PORT=50053 "$RELAY_BIN" 2>&1 | sed 's/^/[relay] /' &
 
 sleep 1
@@ -91,7 +113,7 @@ fi
 
 PARTY_COMMON="COORDINATOR_ADDR=http://localhost:50051 \
   CHAIN_RELAY_ADDR=http://localhost:50053 \
-  SIGNER_ADDRESS=${SIGNER_ADDRESS:-} \
+  SIGNER_ADDRESS=$SIGNER_ADDRESS \
   KEYSTORE_DIR=$REPO/.kosh-shares \
   KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY"
 

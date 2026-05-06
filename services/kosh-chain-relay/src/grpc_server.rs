@@ -8,7 +8,7 @@ pub mod pb {
 use pb::{
     chain_relay_server::ChainRelay as ChainRelayTrait,
     GetContractStateRequest, GetContractStateResponse,
-    SubmitRequest, TxEvent,
+    SubmitRequest, SubmitZkInputRequest, TxEvent,
     tx_event::Status as TxStatus,
 };
 
@@ -25,6 +25,7 @@ impl ChainRelayService {
 #[tonic::async_trait]
 impl ChainRelayTrait for ChainRelayService {
     type SubmitStream = tokio_stream::wrappers::ReceiverStream<Result<TxEvent, Status>>;
+    type SubmitZkInputStream = tokio_stream::wrappers::ReceiverStream<Result<TxEvent, Status>>;
 
     async fn submit(
         &self,
@@ -55,6 +56,59 @@ impl ChainRelayTrait for ChainRelayService {
                     &req.contract_address,
                     req.shortname as u8,
                     &req.args,
+                    &req.label,
+                )
+                .await
+            {
+                Ok(tx_hash) => {
+                    let _ = tx.send(Ok(TxEvent {
+                        status: TxStatus::Confirmed as i32,
+                        tx_id: tx_hash,
+                        error: String::new(),
+                    })).await;
+                }
+                Err(e) => {
+                    let _ = tx.send(Ok(TxEvent {
+                        status: TxStatus::Failed as i32,
+                        tx_id: String::new(),
+                        error: e.to_string(),
+                    })).await;
+                }
+            }
+        });
+
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn submit_zk_input(
+        &self,
+        request: Request<SubmitZkInputRequest>,
+    ) -> Result<Response<Self::SubmitStream>, Status> {
+        let req = request.into_inner();
+        let relay = self.relay.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+
+        let _ = tx.send(Ok(TxEvent {
+            status: TxStatus::Queued as i32,
+            tx_id: String::new(),
+            error: String::new(),
+        })).await;
+
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(TxEvent {
+                status: TxStatus::Submitted as i32,
+                tx_id: String::new(),
+                error: String::new(),
+            })).await;
+
+            match relay
+                .submit_zk_input(
+                    req.party_index,
+                    &req.contract_address,
+                    req.shortname as u8,
+                    &req.public_args,
+                    &req.secret_input,
                     &req.label,
                 )
                 .await
