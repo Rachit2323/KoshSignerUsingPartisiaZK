@@ -10,6 +10,7 @@ pub struct Config {
     pub pqc_addr: String,
     pub chain_relay_addr: String,
     pub signer_address: String,
+    pub partisia_sender_address: String,
     /// Directory where AES-256-GCM encrypted key shares are stored on disk.
     pub keystore_dir: String,
     /// 32-byte hex master key for encrypting/decrypting key shares.
@@ -37,6 +38,7 @@ impl Config {
             chain_relay_addr: std::env::var("CHAIN_RELAY_ADDR")
                 .unwrap_or_else(|_| "http://localhost:50053".into()),
             signer_address: std::env::var("SIGNER_ADDRESS").unwrap_or_default(),
+            partisia_sender_address: std::env::var("PARTISIA_SENDER_ADDRESS").unwrap_or_default(),
             keystore_dir: std::env::var("KEYSTORE_DIR")
                 .unwrap_or_else(|_| ".kosh-shares".into()),
             keystore_master_key: std::env::var("KEYSTORE_MASTER_KEY").unwrap_or_default(),

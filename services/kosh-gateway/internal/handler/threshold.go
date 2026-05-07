@@ -6,24 +6,34 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"golang.org/x/crypto/sha3"
 )
 
 // deriveEvmAddress derives an Ethereum address from a compressed secp256k1 public key hex.
-// EVM address = keccak256(uncompressed_pubkey[1:])[12:]
-// Since we have the compressed key from DKG (33 bytes), we store it as-is and note the address
-// derivation requires decompression — for now return a placeholder if decompression not wired.
+// EVM address = keccak256(uncompressed_pubkey[1:])[12:]   (i.e. keccak256(X || Y), last 20 bytes)
 func deriveEvmAddress(combinedPkHex string) string {
 	if len(combinedPkHex) == 0 {
 		return ""
 	}
 	pkBytes, err := hex.DecodeString(combinedPkHex)
-	if err != nil || len(pkBytes) < 33 {
+	if err != nil || len(pkBytes) != 33 {
 		return ""
 	}
-	// For compressed key: hash the 33 bytes (simplified — proper impl decompresses first)
+	// Decompress the 33-byte compressed pubkey to (X, Y) coordinates.
+	pub, err := secp256k1.ParsePubKey(pkBytes)
+	if err != nil {
+		return ""
+	}
+	xBytes := pub.X().Bytes()
+	yBytes := pub.Y().Bytes()
+	// Left-pad both X and Y to 32 bytes
+	xy := make([]byte, 64)
+	copy(xy[32-len(xBytes):32], xBytes)
+	copy(xy[64-len(yBytes):64], yBytes)
+
 	h := sha3.NewLegacyKeccak256()
-	h.Write(pkBytes[1:]) // skip prefix byte
+	h.Write(xy)
 	hash := h.Sum(nil)
 	if len(hash) < 20 {
 		return ""

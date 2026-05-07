@@ -47,6 +47,7 @@ pub async fn run_all_mta(
     gamma_i: Scalar,
     x_i: Scalar,
     bb_addr: &str,
+    key_material_dir: &str,
     key_id: u32,
     task_id: u32,
 ) -> Result<Vec<MtAOutput>> {
@@ -61,6 +62,7 @@ pub async fn run_all_mta(
                 gamma_i,
                 x_i,
                 bb_addr.to_string(),
+                key_material_dir.to_string(),
                 key_id,
                 task_id,
             )
@@ -81,6 +83,7 @@ async fn run_mta_pair(
     gamma_i: Scalar,
     x_i: Scalar,
     bb_addr: String,
+    key_material_dir: String,
     key_id: u32,
     task_id: u32,
 ) -> Result<MtAOutput> {
@@ -88,8 +91,8 @@ async fn run_mta_pair(
 
     let n_order = secp256k1_n();
 
-    // Generate Paillier keypair for this session
-    let (pk_i, sk_i) = paillier::keygen();
+    // Reuse a persisted Paillier keypair per party to keep signing latency reasonable.
+    let (pk_i, sk_i) = paillier::load_or_generate(&key_material_dir, i)?;
 
     // Serialize and post own Paillier public key
     let pk_topic = format!("mta_pk_{key_id}_{task_id}_party_{i}");

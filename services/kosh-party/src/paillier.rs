@@ -1,20 +1,31 @@
-/// 2048-bit Paillier homomorphic encryption.
-/// Port of client/src/paillier.ts — same math, upgraded to 2048-bit primes.
+/// 2048-bit Paillier homomorphic encryption with persisted per-party keypairs.
+/// Keys are generated once per party and then reused across sign sessions.
 
-use anyhow::{bail, Result};
+use anyhow::{Context, Result};
 use num_bigint::{BigUint, RandBigInt};
 use num_integer::Integer;
 use num_traits::{One, Zero};
 use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 
 use crate::types::{PaillierPrivKey, PaillierPubKey};
 
-const PRIME_BITS: usize = 1024; // p, q are 1024-bit → n is 2048-bit
+const PRIME_BITS: usize = 1024; // p, q are 1024-bit -> n is 2048-bit
+
+#[derive(Serialize, Deserialize)]
+struct StoredKeyPair {
+    n_hex: String,
+    n2_hex: String,
+    g_hex: String,
+    lambda_hex: String,
+    mu_hex: String,
+}
 
 pub fn keygen() -> (PaillierPubKey, PaillierPrivKey) {
-    let p = generate_safe_prime(PRIME_BITS);
+    let p = generate_prime(PRIME_BITS);
     let q = loop {
-        let q = generate_safe_prime(PRIME_BITS);
+        let q = generate_prime(PRIME_BITS);
         if q != p {
             break q;
         }
@@ -31,6 +42,46 @@ pub fn keygen() -> (PaillierPubKey, PaillierPrivKey) {
     let pk = PaillierPubKey { n: n.clone(), n2: n2.clone(), g };
     let sk = PaillierPrivKey { lambda, mu };
     (pk, sk)
+}
+
+pub fn load_or_generate(root: &str, party_index: u32) -> Result<(PaillierPubKey, PaillierPrivKey)> {
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root)
+        .with_context(|| format!("create paillier dir {}", root.display()))?;
+    let path = root.join(format!("paillier-party-{party_index}.json"));
+    if path.exists() {
+        let bytes = fs::read(&path)
+            .with_context(|| format!("read paillier keypair {}", path.display()))?;
+        let stored: StoredKeyPair =
+            serde_json::from_slice(&bytes).context("decode stored paillier keypair")?;
+        let public_key = PaillierPubKey {
+            n: parse_biguint_hex(&stored.n_hex)?,
+            n2: parse_biguint_hex(&stored.n2_hex)?,
+            g: parse_biguint_hex(&stored.g_hex)?,
+        };
+        let private_key = PaillierPrivKey {
+            lambda: parse_biguint_hex(&stored.lambda_hex)?,
+            mu: parse_biguint_hex(&stored.mu_hex)?,
+        };
+        return Ok((public_key, private_key));
+    }
+
+    let (public_key, private_key) = keygen();
+    let stored = StoredKeyPair {
+        n_hex: public_key.n.to_str_radix(16),
+        n2_hex: public_key.n2.to_str_radix(16),
+        g_hex: public_key.g.to_str_radix(16),
+        lambda_hex: private_key.lambda.to_str_radix(16),
+        mu_hex: private_key.mu.to_str_radix(16),
+    };
+    fs::write(&path, serde_json::to_vec_pretty(&stored)?)
+        .with_context(|| format!("write paillier keypair {}", path.display()))?;
+    Ok((public_key, private_key))
+}
+
+fn parse_biguint_hex(input: &str) -> Result<BigUint> {
+    BigUint::parse_bytes(input.as_bytes(), 16)
+        .ok_or_else(|| anyhow::anyhow!("invalid BigUint hex"))
 }
 
 pub fn encrypt(pk: &PaillierPubKey, m: &BigUint) -> BigUint {
@@ -109,17 +160,14 @@ fn mod_sub(a: &BigUint, b: &BigUint, m: &BigUint) -> BigUint {
     }
 }
 
-fn generate_safe_prime(bits: usize) -> BigUint {
-    // A safe prime p = 2q+1 where q is also prime.
-    // We try random candidates and test primality with Miller-Rabin.
+fn generate_prime(bits: usize) -> BigUint {
     let mut rng = OsRng;
     loop {
-        // Generate a random odd candidate of the right bit length
-        let q = rng.gen_biguint(bits as u64 - 1);
-        let q = q | BigUint::one(); // ensure odd
-        let p = &q * BigUint::from(2u32) + BigUint::one();
-        if p.bits() as usize == bits && is_probably_prime(&q, 20) && is_probably_prime(&p, 20) {
-            return p;
+        let mut candidate = rng.gen_biguint(bits as u64);
+        candidate |= BigUint::one();
+        candidate |= BigUint::one() << (bits - 1);
+        if is_probably_prime(&candidate, 16) {
+            return candidate;
         }
     }
 }

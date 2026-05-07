@@ -4,6 +4,7 @@
  */
 import { createPublicClient, http, keccak256, toHex, serializeTransaction, type Hex, type TransactionSerializableLegacy } from "viem";
 import { sepolia } from "viem/chains";
+import { secp256k1 } from "@noble/curves/secp256k1";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -174,8 +175,14 @@ export async function submitSignedTransaction(signedTx: Hex, apiBaseUrl?: string
 }
 
 // ── pubKeyToEvmAddress ────────────────────────────────────────────────────────
-
+// EVM address = keccak256(uncompressed_pubkey[1:])[12:]
+// Decompress 33-byte compressed pubkey to 65-byte uncompressed (04 + X + Y),
+// then hash the 64 bytes (X + Y) and take last 20 bytes.
 export function pubKeyToEvmAddress(compressedPubKey: Uint8Array): Hex {
-  const hash = keccak256(compressedPubKey.slice(1));
+  // @noble/curves provides ProjectivePoint to decompress
+  // viem doesn't expose this directly; use the implementation already imported
+  const point = secp256k1.ProjectivePoint.fromHex(compressedPubKey);
+  const uncompressed = point.toRawBytes(false); // 65 bytes: 04 || X || Y
+  const hash = keccak256(uncompressed.slice(1)); // hash 64 bytes (X || Y)
   return `0x${hash.slice(-40)}` as Hex;
 }

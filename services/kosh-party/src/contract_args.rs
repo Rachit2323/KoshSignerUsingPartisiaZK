@@ -55,10 +55,60 @@ pub fn build_dkg_complete_keygen(key_id: u32) -> Vec<u8> {
     encode_u32_be(key_id)
 }
 
+/// 0x72 register_party_address
+pub fn build_register_party_address(
+    key_id: u32,
+    party_index: u8,
+    address: &[u8],
+) -> Vec<u8> {
+    let mut args = encode_u32_be(key_id);
+    args.push(party_index);
+    args.extend_from_slice(address);
+    args
+}
+
+/// 0x73 register_dilithium_pubkey
+pub fn build_register_dilithium_pubkey(
+    key_id: u32,
+    party_index: u8,
+    dilithium_pubkey: &[u8],
+) -> Vec<u8> {
+    let mut args = encode_u32_be(key_id);
+    args.push(party_index);
+    args.extend_from_slice(&encode_vec(dilithium_pubkey));
+    args
+}
+
+/// 0x74 register_kyber_pubkey
+pub fn build_register_kyber_pubkey(
+    key_id: u32,
+    party_index: u8,
+    kyber_pubkey: &[u8],
+) -> Vec<u8> {
+    let mut args = encode_u32_be(key_id);
+    args.push(party_index);
+    args.extend_from_slice(&encode_vec(kyber_pubkey));
+    args
+}
+
 /// 0x50 gg20_start_signing (triggers ZK nodes to start partial sig computation)
 pub fn build_gg20_start_signing(key_id: u32, task_id: u32, signing_parties: &[u8]) -> Vec<u8> {
     let mut args = encode_u32_be(key_id);
     args.extend_from_slice(&encode_u32_be(task_id));
+    args.extend_from_slice(&encode_vec(signing_parties));
+    args
+}
+
+/// 0x59 open_signing_session_v4
+pub fn build_open_signing_session_v4(
+    key_id: u32,
+    message_hash: &[u8],
+    tx_tag: &[u8],
+    signing_parties: &[u8],
+) -> Vec<u8> {
+    let mut args = encode_u32_be(key_id);
+    args.extend_from_slice(&encode_vec(message_hash));
+    args.extend_from_slice(&encode_vec(tx_tag));
     args.extend_from_slice(&encode_vec(signing_parties));
     args
 }
@@ -89,6 +139,11 @@ pub fn build_submit_gamma(key_id: u32, party_index: u8, gamma_point: &[u8]) -> V
 
 /// 0x47 gg20_finalize_r (Party 1: compute R = delta^-1 * Gamma on-chain)
 pub fn build_gg20_finalize_r(key_id: u32) -> Vec<u8> {
+    encode_u32_be(key_id)
+}
+
+/// 0x48 abort_signing
+pub fn build_abort_signing(key_id: u32) -> Vec<u8> {
     encode_u32_be(key_id)
 }
 

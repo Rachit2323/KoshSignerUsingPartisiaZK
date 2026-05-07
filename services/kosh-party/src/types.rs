@@ -23,6 +23,7 @@ pub struct PaillierPubKey {
 }
 
 /// Paillier private key. BigUint doesn't implement Zeroize, so we drop manually.
+#[derive(Clone)]
 pub struct PaillierPrivKey {
     pub lambda: BigUint,
     pub mu: BigUint,

@@ -391,7 +391,7 @@ function normalizeJob(job: Record<string, unknown>): JobRecord {
   return {
     id: String(job.id ?? ""),
     status: String(job.status ?? "idle").toLowerCase(),
-    phase: String(job.phase ?? "queued").toLowerCase(),
+    phase: String(job.phase ?? job.status ?? "queued").toLowerCase(),
     logs: Array.isArray(job.logs) ? job.logs.map((value) => String(value)) : [],
     error: typeof job.error === "string" ? job.error : null,
     updatedAt: typeof job.updated_at === "string" ? String(job.updated_at) : undefined,

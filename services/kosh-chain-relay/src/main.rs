@@ -1,5 +1,6 @@
 mod grpc_server;
 mod relay;
+mod state_decode;
 
 use grpc_server::{
     pb::chain_relay_server::ChainRelayServer,

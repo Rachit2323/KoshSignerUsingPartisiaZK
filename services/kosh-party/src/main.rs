@@ -7,6 +7,7 @@ mod gg20;
 mod mta;
 mod paillier;
 mod phase;
+mod pqc_identity;
 mod share_store;
 mod types;
 
@@ -68,7 +69,7 @@ impl PartyService for PartyServiceImpl {
             .map_err(|_| Status::invalid_argument("message_hash must be 32 bytes"))?;
 
         let signing_subset: Vec<u32> = r.signing_subset.iter().map(|&x| x as u32).collect();
-        let task_id = r.key_id; // simplified; real impl fetches from keystore
+        let task_id = if r.session_id != 0 { r.session_id } else { r.key_id };
 
         tokio::spawn(async move {
             if let Err(e) = phase::run_sign(

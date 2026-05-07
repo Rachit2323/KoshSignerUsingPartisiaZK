@@ -40,14 +40,15 @@ PARTISIA_SENDER_ADDRESS_2="$(derive_sender_address "$PARTISIA_SENDER_KEY_2")"
 PARTISIA_SENDER_ADDRESS_3="$(derive_sender_address "$PARTISIA_SENDER_KEY_3")"
 
 # ── Kill any leftover processes on our ports ──────────────────────────────────
-echo "Clearing old processes on ports 50051 50052 50060 50061 50062 8080 9090..."
+echo "Clearing old processes on ports 50051 50052 50053 50060 50061 50062 8080 9090 5173-5176..."
 pkill -f "kosh-party" 2>/dev/null || true
 pkill -f "kosh-coordinator" 2>/dev/null || true
 pkill -f "kosh-policy" 2>/dev/null || true
 pkill -f "kosh-gateway" 2>/dev/null || true
 pkill -f "kosh-monitor" 2>/dev/null || true
 pkill -f "kosh-chain-relay" 2>/dev/null || true
-lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
+pkill -f "vite" 2>/dev/null || true
+lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090,5173,5174,5175,5176 2>/dev/null | xargs kill -9 2>/dev/null || true
 sleep 2
 
 cleanup() {
@@ -60,7 +61,8 @@ cleanup() {
   pkill -f "kosh-policy" 2>/dev/null || true
   pkill -f "kosh-monitor" 2>/dev/null || true
   pkill -f "kosh-chain-relay" 2>/dev/null || true
-  lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090 2>/dev/null | xargs kill -9 2>/dev/null || true
+  pkill -f "vite" 2>/dev/null || true
+  lsof -ti:50051,50052,50053,50060,50061,50062,8080,9090,5173,5174,5175,5176 2>/dev/null | xargs kill -9 2>/dev/null || true
   wait 2>/dev/null || true
   echo "All stopped."
 }
@@ -85,20 +87,20 @@ echo "[3/8] kosh-monitor      (HTTP :9090)"
 (cd "$SERVICES/kosh-monitor" && go run ./cmd/monitor 2>&1 | sed 's/^/[monitor] /') &
 
 echo "[4/8] kosh-gateway      (HTTP :8080)"
-(cd "$SERVICES/kosh-gateway" && go run ./cmd/gateway 2>&1 | sed 's/^/[gateway] /') &
+(cd "$SERVICES/kosh-gateway" && WEBAUTHN_ORIGIN=http://localhost:5173 go run ./cmd/gateway 2>&1 | sed 's/^/[gateway] /') &
 
 sleep 1  # let gateway bind before starting parties
 
 # ── Rust party daemons (already compiled — use pre-built binary) ──────────────
 PARTY_BIN="$REPO/target/release/kosh-party"
-if [ ! -f "$PARTY_BIN" ]; then
+if [ ! -f "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/phase.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/dkg.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/main.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/config.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/contract_args.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/paillier.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/src/pqc_identity.rs" -nt "$PARTY_BIN" ] || [ "$REPO/services/kosh-party/Cargo.toml" -nt "$PARTY_BIN" ]; then
   echo "Building kosh-party (first run — takes ~60s)..."
   (cd "$REPO" && cargo build -p kosh-party --release 2>&1 | tail -3)
 fi
 
 # ── kosh-chain-relay (Partisia blockchain client) ─────────────────────────────
 RELAY_BIN="$REPO/target/release/kosh-chain-relay"
-if [ ! -f "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/relay.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/grpc_server.rs" -nt "$RELAY_BIN" ]; then
+if [ ! -f "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/relay.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/grpc_server.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/main.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/src/state_decode.rs" -nt "$RELAY_BIN" ] || [ "$REPO/services/kosh-chain-relay/Cargo.toml" -nt "$RELAY_BIN" ]; then
   echo "Building kosh-chain-relay (first run)..."
   (cd "$REPO" && cargo build -p kosh-chain-relay --release 2>&1 | tail -3)
 fi
@@ -125,11 +127,14 @@ fi
 
 # Always run parties against the configured signer. Do not silently fall back
 # to local-only mode; the UI/backend assume the live signer path is active.
-PARTY_SIGNER="$SIGNER_ADDRESS"
+# Empty signer addr → parties run local DKG + local GG20 signing (no Partisia tx).
+# Set ON_CHAIN=1 in env to opt into the full on-chain ZK ceremony (requires gas).
+PARTY_SIGNER="${ON_CHAIN:+$SIGNER_ADDRESS}"
 
 PARTY_COMMON="COORDINATOR_ADDR=http://localhost:50051 \
   CHAIN_RELAY_ADDR=http://localhost:50053 \
   SIGNER_ADDRESS=$PARTY_SIGNER \
+  PARTISIA_SENDER_ADDRESS=$PARTISIA_SENDER_ADDRESS_1 \
   KEYSTORE_DIR=$REPO/.kosh-shares \
   KEYSTORE_MASTER_KEY=$KEYSTORE_MASTER_KEY"
 
@@ -146,7 +151,7 @@ sleep 2  # wait for all backend services before Vite starts
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 echo "[9/9] frontend          (Vite  http://localhost:5173)"
-(cd "$REPO/frontend" && npx vite 2>&1 | sed 's/^/[vite] /') &
+(cd "$REPO/frontend" && npx vite --host localhost --port 5173 --strictPort 2>&1 | sed 's/^/[vite] /') &
 
 echo ""
 echo "=== All services started ==="

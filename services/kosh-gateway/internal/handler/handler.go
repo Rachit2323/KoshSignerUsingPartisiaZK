@@ -12,7 +12,7 @@ import (
 
 const (
 	dkgTimeout  = 5 * time.Minute
-	signTimeout = 3 * time.Minute
+	signTimeout = 10 * time.Minute
 )
 
 type Handler struct {

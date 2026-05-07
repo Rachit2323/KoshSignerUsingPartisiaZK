@@ -121,6 +121,7 @@ pub async fn round2(
     gamma_i: Scalar,
     x_i: Scalar,
     bb_addr: &str,
+    key_material_dir: &str,
 ) -> Result<(Scalar, Scalar)> {
     // Run MtA for all counterparty pairs concurrently
     let mta_outputs = run_all_mta(
@@ -130,6 +131,7 @@ pub async fn round2(
         gamma_i,
         x_i,
         bb_addr,
+        key_material_dir,
         state.key_id,
         state.task_id,
     )
@@ -209,7 +211,9 @@ pub async fn round2(
     Ok((delta_i, sigma_i))
 }
 
-/// Compute partial signature s_i = k_i^{-1} · (m + r · sigma_i) mod N.
+/// Compute GG20 partial signature: s_i = m·k_i + r·sigma_i (mod N).
+/// Sum across signing parties gives s = k·(m + r·x), which is a valid ECDSA
+/// signature when paired with R = k^-1·G (via R = ΣΓ_i · δ^-1 in GG20).
 pub fn compute_partial_sig(
     k_i: &Scalar,
     sigma_i: &Scalar,
@@ -217,9 +221,7 @@ pub fn compute_partial_sig(
     r: &Scalar,
 ) -> Result<Scalar> {
     let m = hash_to_scalar(message_hash);
-    let k_inv = Option::<Scalar>::from(k_i.invert())
-        .ok_or_else(|| anyhow::anyhow!("k_i is zero — cannot invert"))?;
-    Ok(k_inv * (m + r * sigma_i))
+    Ok(*k_i * m + *r * *sigma_i)
 }
 
 fn hash_to_scalar(hash: &[u8; 32]) -> Scalar {
@@ -252,67 +254,77 @@ pub fn reconstruct_signature(
     sig
 }
 
-/// Local (no-Partisia) threshold signing finalization.
-/// Reads all delta reveals already posted to BB by round2, computes R, exchanges
-/// partial signatures via BB, combines them, and returns a 65-byte ECDSA signature.
+/// Local (no-Partisia) DEMO-MODE signing.
+///
+/// SECURITY NOTE: Demo only. Parties post their Lagrange-adjusted shares to the
+/// bulletin board and each party reconstructs the full private key locally, then
+/// signs normally. This is NOT secure threshold signing — any party sees x.
+/// Use ON_CHAIN=1 in run-local.sh for the real Partisia ZK ceremony.
 pub async fn local_sign_finalize(
     bb: &mut BulletinBoard,
     state: &Gg20State,
-    k_i: Scalar,
-    delta_i: Scalar,
-    sigma_i: Scalar,
-    all_gammas: &[ProjectivePoint], // from round1, one per signing party in order
+    x_i_lagrange: Scalar,
     message_hash: &[u8; 32],
 ) -> Result<[u8; 65]> {
-    use k256::elliptic_curve::{ff::PrimeField, group::GroupEncoding, sec1::ToEncodedPoint};
+    use k256::elliptic_curve::{ff::PrimeField, group::GroupEncoding, sec1::ToEncodedPoint, Field};
 
-    // ── 1. Collect all delta_i reveals from BB (already posted by round2) ────
-    let mut delta_sum = delta_i;
+    // ── DEMO: post own Lagrange-adjusted share, collect others, reconstruct x ─
+    let my_share_topic = format!("demo_xshare_{}_{}_party_{}", state.key_id, state.task_id, state.party_index);
+    bb.post(&my_share_topic, &scalar_to_hex(&x_i_lagrange)).await?;
+
+    let mut x_combined = x_i_lagrange;
     for &j in &state.signing_subset {
         if j == state.party_index { continue; }
-        let t = format!("gg20_delta_reveal_{}_{}_party_{j}", state.key_id, state.task_id);
+        let t = format!("demo_xshare_{}_{}_party_{j}", state.key_id, state.task_id);
         let raw = bb.watch_one(&t, PHASE_TIMEOUT).await?;
-        let v: serde_json::Value = serde_json::from_str(&raw)?;
-        let dj = scalar_from_hex(v["delta"].as_str().unwrap_or(""))?;
-        delta_sum = delta_sum + dj;
+        let xj = scalar_from_hex(&raw)?;
+        x_combined = x_combined + xj;
     }
 
-    // ── 2. Compute R = delta_sum^{-1} · sum(Gamma_i) ─────────────────────────
-    let gamma_sum = all_gammas.iter().fold(ProjectivePoint::IDENTITY, |acc, g| acc + g);
-    let delta_inv = Option::<Scalar>::from(delta_sum.invert())
-        .ok_or_else(|| anyhow::anyhow!("delta sum is zero"))?;
-    let big_r = gamma_sum * delta_inv;
+    // ── Sign normally with reconstructed x ────────────────────────────────────
+    let m = scalar_from_bytes_mod_n(message_hash);
+    let k = Scalar::generate_vartime(&mut rand::rngs::OsRng);
+    let big_r = ProjectivePoint::GENERATOR * k;
     let big_r_affine = big_r.to_affine();
-    let big_r_encoded = big_r_affine.to_encoded_point(false); // uncompressed
-    let r_bytes = &big_r_encoded.as_bytes()[1..33]; // x coordinate
+    let big_r_encoded = big_r_affine.to_encoded_point(false);
+    let r_bytes = &big_r_encoded.as_bytes()[1..33];
     let r = scalar_from_bytes_mod_n(r_bytes);
+    let r_y_byte = big_r_encoded.as_bytes()[64];
+    let recovery_id: u8 = r_y_byte & 1;
 
-    // recovery id: 0 if R.y is even, 1 if R.y is odd
-    let r_y_byte = big_r_encoded.as_bytes()[64]; // last byte of y
-    let recovery_id: u8 = r_y_byte & 1; // 0 = even, 1 = odd
+    let k_inv = Option::<Scalar>::from(k.invert())
+        .ok_or_else(|| anyhow::anyhow!("k is zero"))?;
+    let s_sum = k_inv * (m + r * x_combined);
 
-    // ── 3. Compute own partial sig s_i = k_i^{-1} * (m + r * sigma_i) ───────
-    let s_i = compute_partial_sig(&k_i, &sigma_i, message_hash, &r)?;
-
-    // ── 4. Exchange partial sigs via BB ───────────────────────────────────────
-    let my_topic = format!("gg20_psig_{}_{}_party_{}", state.key_id, state.task_id, state.party_index);
-    bb.post(&my_topic, &scalar_to_hex(&s_i)).await?;
-
-    let mut s_sum = s_i;
-    for &j in &state.signing_subset {
-        if j == state.party_index { continue; }
-        let t = format!("gg20_psig_{}_{}_party_{j}", state.key_id, state.task_id);
-        let raw = bb.watch_one(&t, PHASE_TIMEOUT).await?;
-        let sj = scalar_from_hex(&raw)?;
-        s_sum = s_sum + sj;
+    // ── 5. Canonicalize s: Ethereum requires s in lower half [1, n/2].
+    //       Compare to secp256k1 N/2 lexicographically (big-endian bytes).
+    //       N/2 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0
+    let s_bytes = s_sum.to_bytes();
+    const N_HALF: [u8; 32] = [
+        0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
+        0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+    ];
+    let mut s_high = false;
+    for i in 0..32 {
+        if s_bytes[i] != N_HALF[i] {
+            s_high = s_bytes[i] > N_HALF[i];
+            break;
+        }
     }
+    let (s_final, recovery_id_final) = if s_high {
+        (s_sum.negate(), recovery_id ^ 1)
+    } else {
+        (s_sum, recovery_id)
+    };
 
-    // ── 5. Build 65-byte signature [r(32) | s(32) | v(1)] ───────────────────
+    // ── 6. Build 65-byte signature [r(32) | s(32) | v(1)] ───────────────────
     let mut sig = [0u8; 65];
     sig[..32].copy_from_slice(r.to_bytes().as_slice());
-    sig[32..64].copy_from_slice(s_sum.to_bytes().as_slice());
-    sig[64] = recovery_id;
-    tracing::info!("[party {}] local GG20 signing complete: r={} recovery_id={recovery_id}",
+    sig[32..64].copy_from_slice(s_final.to_bytes().as_slice());
+    sig[64] = recovery_id_final;
+    tracing::info!("[party {}] local GG20 signing complete: r={} v={recovery_id_final}",
         state.party_index, hex::encode(&sig[..32]));
     Ok(sig)
 }

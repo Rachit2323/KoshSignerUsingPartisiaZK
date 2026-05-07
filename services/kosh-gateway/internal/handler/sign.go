@@ -17,6 +17,7 @@ type SignRequest struct {
 	MessageHashHex string  `json:"message_hash"`
 	TxTag         string   `json:"tx_tag"`
 	SigningSubset  []uint32 `json:"signing_subset"`
+	SessionID     uint32   `json:"session_id"`
 }
 
 type SignResponse struct {
@@ -87,7 +88,8 @@ func (h *Handler) HandleSignPost(w http.ResponseWriter, r *http.Request) {
 				KeyId:         req.KeyID,
 				MessageHash:   msgBytes,
 				TxTag:         req.TxTag,
-				SigningSubset:  req.SigningSubset,
+				SigningSubset: req.SigningSubset,
+				SessionId:     req.SessionID,
 			})
 			if err != nil {
 				results <- result{pi, nil, fmt.Errorf("party %d StartSign: %w", pi, err)}

@@ -256,7 +256,7 @@ func (h *Handler) HandlePasskeysReuseSign(w http.ResponseWriter, r *http.Request
 				pc := h.clients.Parties[pIdx-1]
 				stream, err := pc.StartSign(ctx, &party_pb.SignRequest{
 					KeyId: selectedKeyID, MessageHash: msgBytes,
-					TxTag: body.TxTag, SigningSubset: body.SigningParties,
+					TxTag: body.TxTag, SigningSubset: body.SigningParties, SessionId: body.SessionID,
 				})
 				if err != nil {
 					results <- res{pIdx, nil, fmt.Errorf("party %d: %w", pIdx, err)}

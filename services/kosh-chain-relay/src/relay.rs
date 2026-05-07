@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
+use crate::state_decode::normalize_signer_state;
+
 const NODE_FAILURE_COOLDOWN_MS: i64 = 10_000;
 
 #[derive(Clone)]
@@ -69,26 +71,47 @@ impl ChainRelay {
     }
 
     pub async fn get_contract_state(&self, contract_address: &str) -> Result<String> {
-        let node = self.pick_node().await;
-        let url = format!(
-            "{node}/shards/Shard0/blockchain/contracts/{contract_address}?requireContractState=true"
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .with_context(|| format!("GET {url}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(anyhow!("contract read failed HTTP {status}"));
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 1..=self.node_urls.len().max(1) {
+            let node = self.pick_node().await;
+            let url = format!(
+                "{node}/shards/Shard0/blockchain/contracts/{contract_address}?requireContractState=true"
+            );
+            let resp = match self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("GET {url}"))
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < self.node_urls.len() {
+                        self.advance_node().await;
+                        continue;
+                    }
+                    break;
+                }
+            };
+            let status = resp.status();
+            if !status.is_success() {
+                last_err = Some(anyhow!("contract read failed HTTP {status}"));
+                if attempt < self.node_urls.len() {
+                    self.advance_node().await;
+                    continue;
+                }
+                break;
+            }
+            let body: Value = resp.json().await.context("decode contract state")?;
+            let raw = body
+                .get("serializedContract")
+                .cloned()
+                .unwrap_or(body);
+            let normalized = normalize_signer_state(&raw)?;
+            return Ok(normalized.to_string());
         }
-        let body: Value = resp.json().await.context("decode contract state")?;
-        Ok(body
-            .get("serializedContract")
-            .cloned()
-            .unwrap_or(body)
-            .to_string())
+        Err(last_err.unwrap_or_else(|| anyhow!("contract read failed")))
     }
 
     /// Submit a contract action and stream back status events.
@@ -156,6 +179,11 @@ impl ChainRelay {
                     last_err = Some(err);
                     continue;
                 }
+                Err(err) if attempt < 3 => {
+                    self.advance_node().await;
+                    last_err = Some(err);
+                    continue;
+                }
                 Err(err) => return Err(err),
             }
         }
@@ -183,24 +211,26 @@ impl ChainRelay {
         // prefixed with 0x09.
         let mut rpc = vec![shortname];
         rpc.extend_from_slice(public_args);
-
-        let request = serde_json::json!({
-            "nodeUrls": self.node_urls,
-            "senderKey": sender_key,
-            "senderAddress": sender_address,
-            "contractAddress": contract_address,
-            "publicRpcHex": hex::encode(rpc),
-            "secretHex": hex::encode(secret_input),
-            "gasCost": 750000,
-            "maxRetries": self.node_urls.len(),
-        });
+        let public_rpc_hex = hex::encode(&rpc);
 
         let sender_lock = self.sender_lock(&sender_address).await;
         let _sender_guard = sender_lock.lock().await;
-        let helper = zk_input_helper_path()?;
         let mut last_err: Option<anyhow::Error> = None;
 
         for attempt in 1..=3 {
+            let node = self.pick_node().await;
+            let request = serde_json::json!({
+            "nodeUrls": [node.clone()],
+            "senderKey": sender_key,
+            "senderAddress": sender_address,
+            "contractAddress": contract_address,
+            "publicRpcHex": public_rpc_hex,
+            "secretHex": hex::encode(secret_input),
+            "gasCost": 750000,
+            "maxRetries": 1,
+        });
+
+            let helper = zk_input_helper_path()?;
             let mut child = tokio::process::Command::new("node")
                 .arg(&helper)
                 .stdin(Stdio::piped())
@@ -248,6 +278,11 @@ impl ChainRelay {
                 continue;
             }
 
+            if attempt < 3 {
+                self.advance_node().await;
+                last_err = Some(anyhow!("zk input helper failed: {msg}"));
+                continue;
+            }
             return Err(anyhow!("zk input helper failed: {msg}"));
         }
 
@@ -255,10 +290,13 @@ impl ChainRelay {
     }
 
     async fn pick_node(&self) -> String {
+        let cursor = self.node_cursor.lock().await;
+        self.node_urls[*cursor % self.node_urls.len()].clone()
+    }
+
+    async fn advance_node(&self) {
         let mut cursor = self.node_cursor.lock().await;
-        let node = self.node_urls[*cursor % self.node_urls.len()].clone();
         *cursor = (*cursor + 1) % self.node_urls.len().max(1);
-        node
     }
 
     async fn reserve_nonce(
