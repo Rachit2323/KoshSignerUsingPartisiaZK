@@ -6,8 +6,10 @@ mod dkg;
 mod gg20;
 mod mta;
 mod paillier;
+mod paillier_proofs;
 mod phase;
 mod pqc_identity;
+mod range_proof;
 mod share_store;
 mod types;
 
@@ -69,7 +71,16 @@ impl PartyService for PartyServiceImpl {
             .map_err(|_| Status::invalid_argument("message_hash must be 32 bytes"))?;
 
         let signing_subset: Vec<u32> = r.signing_subset.iter().map(|&x| x as u32).collect();
-        let task_id = if r.session_id != 0 { r.session_id } else { r.key_id };
+        // Each signing attempt needs a unique task_id so the bulletin board
+        // doesn't serve stale messages from a previous (possibly failed) attempt.
+        let task_id = if r.session_id != 0 {
+            r.session_id
+        } else {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32
+        };
 
         tokio::spawn(async move {
             if let Err(e) = phase::run_sign(

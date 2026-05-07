@@ -1,0 +1,37 @@
+[2m2026-05-07T16:18:00.981352Z[0m [32m INFO[0m [2mkosh_chain_relay[0m[2m:[0m kosh-chain-relay listening on 0.0.0.0:50053
+[2m2026-05-07T16:18:33.449236Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_create_key submitted tx=ed75878f43a73870b292ec54a2b525219d134520a3d122d07ea57ed696fb52e0 attempt=1
+[2m2026-05-07T16:18:36.154098Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_commit submitted tx=050e136e8b327ca26f746ebb1df2084e58719de6ee0cf311908bcd9aec8ebe23 attempt=1
+[2m2026-05-07T16:18:36.676528Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_commit submitted tx=09053f6d6211ec4d13c7a5e08dc7e281e30ebd26a43a63d4ffeecc7640f66fa0 attempt=1
+[2m2026-05-07T16:18:37.207197Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_commit submitted tx=a1420a76d3468aaed12fa5ef329a1f2ec164d67037214601772c95640b4669ea attempt=1
+[2m2026-05-07T16:18:37.736031Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_reveal submitted tx=1927bc24a63fa129c363843852627b0c4360a4fe7fb3408ce165792e4e3b33bf attempt=1
+[2m2026-05-07T16:18:40.434892Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_reveal submitted tx=d82bbb9eaf304d66c6b5e21d07132f52b527e86f729317a27da43aa5b09a1dda attempt=1
+[2m2026-05-07T16:18:43.141446Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_reveal submitted tx=ba3609d95541af26b963b795f0d532b06247519a6a9c61984b7dcb41c820953c attempt=1
+[2m2026-05-07T16:18:45.858027Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_finalize submitted tx=8032f432560c56871ea337e8b402b73576a0ea987371c6de7059669bc046e54b attempt=1
+[2m2026-05-07T16:18:51.691985Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_hi submitted zk tx=99a8670e8cb539d427e91ffe41f5805639231dc64dc7c47acf5662f9d74f5805 attempt=1
+[2m2026-05-07T16:18:54.917037Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_hi submitted zk tx=f06d01a0df7b9d9f4cd609d9253d1082a82352e873e005daffa93eaa6a803b9f attempt=1
+[2m2026-05-07T16:18:58.212182Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_hi submitted zk tx=3ef69ec710ebe7227986096976bd9ffcf59b584285d048bfc9d9e7e6cb33f64b attempt=1
+[2m2026-05-07T16:19:01.572192Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_lo submitted zk tx=cdea7bb788d158249cf924a0d81036620aa0878b4dab88dd73dcb6cb2e4f6372 attempt=1
+[2m2026-05-07T16:19:05.002597Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_lo submitted zk tx=7f5d22bd331bbf2ef80be9193ce7088c9540301961bce03e7a244ce9385c1c79 attempt=1
+[2m2026-05-07T16:19:08.502532Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_key_share_lo submitted zk tx=435c3329da4c8f122500424e68dc09daa354ea87499efd7ae6ea3bd8d1d08fe0 attempt=1
+[2m2026-05-07T16:19:08.682720Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m dkg_complete_keygen submitted tx=f15967f3f23438ff2ec9e7b4413e59374b70080093dd054079eb92a9a3e8c039 attempt=1
+[2m2026-05-07T16:20:16.243133Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_party_address submitted tx=d1df87c01ed63336969c152579b5cbc0e5f12e26f23b1cf05fe06134f726aa35 attempt=1
+[2m2026-05-07T16:20:18.939808Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_dilithium_pubkey submitted tx=41339d0f20b7d23abede1b13bcf1c93111178e6fb9d2cc052bf70f27c9e381c1 attempt=1
+[2m2026-05-07T16:20:21.637061Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_kyber_pubkey submitted tx=9af544e0dd8ef5c61414f0171c88e244e7d6e9a50a43a0286ab727e6366cd34b attempt=1
+[2m2026-05-07T16:20:24.332586Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_party_address submitted tx=35b059dbb72de0f795c1cca36ed5fd85c66abc9726ef25bbfd874e16d7c5598a attempt=1
+[2m2026-05-07T16:20:27.034816Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_dilithium_pubkey submitted tx=991da29f5fe2eaedb7a3d1d9f55a2729e76f5220dc1d36338301cd7f7eab7383 attempt=1
+[2m2026-05-07T16:20:29.762900Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_kyber_pubkey submitted tx=033c7a17db20dd6e7b267b7750f8b888b03c55967945dc65c199710d2ef73aec attempt=1
+[2m2026-05-07T16:20:32.526191Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_party_address submitted tx=04b6c681a8f6ab1445ca48d7f6df90a90a828dcf1cbcbc80ecae4eb931e65ab6 attempt=1
+[2m2026-05-07T16:20:35.225861Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_dilithium_pubkey submitted tx=11ea34bcc7ef60abc1d7ef52d04eb8a64cee66345545da599c608bbd08df2612 attempt=1
+[2m2026-05-07T16:20:35.756608Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m register_kyber_pubkey submitted tx=486a734a0ee4328eb25a7d3b66da72e9e039638280ac29239ff3e1e942b4d28b attempt=1
+[2m2026-05-07T16:20:38.453732Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m open_signing_session_v4 submitted tx=9b71f5fa19dae22766bb90d0bfde83e93808b021cd05344687d43eb65b5776eb attempt=1
+[2m2026-05-07T16:20:42.232032Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_pqc_approval submitted tx=b7a59ac4740c530704941126a173aea79397f67e56f76a845707356cb6146b39 attempt=1
+[2m2026-05-07T16:20:44.927068Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_pqc_approval submitted tx=e20bc7359daba66f94976b9e596e615ad321397f2b3c889d3ec7b356a8392c4e attempt=1
+[2m2026-05-07T16:20:47.623696Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m finalize_pqc_approval submitted tx=f6984e9fc9692ef3e5b8ae91c19dd0548716efc98a71930a9de64f048b729912 attempt=1
+[2m2026-05-07T16:20:50.313815Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m gg20_start_signing submitted tx=1154e6ee673dfe11dd9ec81810ba05e77db1fbbcb085cc7c77ebcc3ced2378c8 attempt=1
+[2m2026-05-07T16:20:53.012178Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m commit_delta submitted tx=d182e736470f69c437c56c4552c44b09f59dd5d0b02f6e4b061c6e9bc5cf4649 attempt=1
+[2m2026-05-07T16:20:55.711878Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m commit_delta submitted tx=78562e75a6ef57cc6a77c13aac05b7930c5f55a0dbd3535f7ca8cce29e0e5e5c attempt=1
+[2m2026-05-07T16:20:58.417525Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_delta submitted tx=3851fbdc023a027c4f88b76605d01194470f8f55803e7cc08f4f51f081ec72ba attempt=1
+[2m2026-05-07T16:21:01.105484Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_delta submitted tx=fcbc9ae324d0abce47b884b25056620237f6d9cca8884d28d10c911e315c2ee8 attempt=1
+[2m2026-05-07T16:21:03.790474Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_gamma submitted tx=e0ecfd33c8f2b0665a7751a8754832e800e8d556a9e8412fd8d909b97b71ddc2 attempt=1
+[2m2026-05-07T16:21:06.488889Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m submit_gamma submitted tx=a7eb46b8351e56d762ed72568bf04ce47fb2bec6716a51e46371d7ab5f6b05bb attempt=1
+[2m2026-05-07T16:21:09.183506Z[0m [32m INFO[0m [2mkosh_chain_relay::relay[0m[2m:[0m gg20_finalize_r submitted tx=250f3b0bb10c5d2564f32b5660b206feacfa62f0a4586eef6311c1c9ae66fed0 attempt=1

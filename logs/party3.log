@@ -1,0 +1,24 @@
+[2m2026-05-07T16:18:02.534770Z[0m [32m INFO[0m [2mkosh_party[0m[2m:[0m kosh-party 3 listening on 0.0.0.0:50062 (coordinator=http://localhost:50051)
+[2m2026-05-07T16:18:32.538642Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] DKG commit posted for key 918380815
+[2m2026-05-07T16:18:32.542077Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] received + verified commit from party 1
+[2m2026-05-07T16:18:32.545171Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] received + verified commit from party 2
+[2m2026-05-07T16:18:32.548388Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] verified subshare from party 1
+[2m2026-05-07T16:18:32.550898Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] verified subshare from party 2
+[2m2026-05-07T16:18:32.550916Z[0m [32m INFO[0m [2mkosh_party::dkg[0m[2m:[0m [party 3] DKG subshares combined → x_i = Σ f_j(i)
+[2m2026-05-07T16:18:32.552048Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for on-chain DKG create key=918380815
+[2m2026-05-07T16:18:35.975727Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] 0x21 dkg_commit key=918380815
+[2m2026-05-07T16:18:37.029392Z[0m [32m INFO[0m [2mkosh_party::chain_relay_client[0m[2m:[0m [relay] tx confirmed: 09053f6d6211ec4d13c7a5e08dc7e281e30ebd26a43a63d4ffeecc7640f66fa0
+[2m2026-05-07T16:18:37.031239Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for all DKG commits key=918380815
+[2m2026-05-07T16:18:37.554097Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] 0x22 dkg_reveal key=918380815
+[2m2026-05-07T16:18:40.257861Z[0m [32m INFO[0m [2mkosh_party::chain_relay_client[0m[2m:[0m [relay] tx confirmed: 1927bc24a63fa129c363843852627b0c4360a4fe7fb3408ce165792e4e3b33bf
+[2m2026-05-07T16:18:40.260135Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for all DKG reveals key=918380815
+[2m2026-05-07T16:18:45.679338Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for DKG finalize key=918380815
+[2m2026-05-07T16:18:48.382825Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] 0x10 submit_key_share[hi] key=918380815
+[2m2026-05-07T16:18:58.213635Z[0m [32m INFO[0m [2mkosh_party::chain_relay_client[0m[2m:[0m [relay] zk tx confirmed: 3ef69ec710ebe7227986096976bd9ffcf59b584285d048bfc9d9e7e6cb33f64b
+[2m2026-05-07T16:18:58.213823Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] 0x10 submit_key_share[lo] key=918380815
+[2m2026-05-07T16:19:08.504024Z[0m [32m INFO[0m [2mkosh_party::chain_relay_client[0m[2m:[0m [relay] zk tx confirmed: 435c3329da4c8f122500424e68dc09daa354ea87499efd7ae6ea3bd8d1d08fe0
+[2m2026-05-07T16:19:08.505598Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for all DKG share uploads key=918380815
+[2m2026-05-07T16:19:08.506741Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] waiting for DKG complete key=918380815
+[2m2026-05-07T16:19:11.211349Z[0m [32m INFO[0m [2mkosh_party::share_store[0m[2m:[0m share saved → /Users/rachitsharma/Desktop/wasserstoff/KoshSignerUsingPartisiaZK/.kosh-shares/runtime-contract-0353980c937b95faac89ee9af366471b64d9206f2e-key-918380815-party-3.json
+[2m2026-05-07T16:19:11.211419Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] key share saved to /Users/rachitsharma/Desktop/wasserstoff/KoshSignerUsingPartisiaZK/.kosh-shares
+[2m2026-05-07T16:19:11.211452Z[0m [32m INFO[0m [2mkosh_party::phase[0m[2m:[0m [party 3] DKG complete key=918380815 pk=02f583f869c88f8eefa585f0762fdf25361c9b35a1e407badbcc7ea1ad2031a949

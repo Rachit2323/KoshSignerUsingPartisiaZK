@@ -45,7 +45,7 @@ pub struct Gg20State {
     pub signing_subset: Vec<u32>,
     pub message_hash: [u8; 32],
     pub tx_tag: String,
-
+    
     pub k_i: Option<Scalar>,
     pub gamma_i: Option<Scalar>,
     pub big_gamma_i: Option<k256::ProjectivePoint>,

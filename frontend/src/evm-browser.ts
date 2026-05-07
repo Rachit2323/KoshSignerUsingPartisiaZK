@@ -167,7 +167,10 @@ export async function submitSignedTransaction(signedTx: Hex, apiBaseUrl?: string
       body: JSON.stringify({ signed_tx_hex: signedTx }),
     });
     if (resp.ok) {
-      const body = (await resp.json()) as { tx_hash?: Hex };
+      const body = (await resp.json()) as { tx_hash?: Hex; submitted?: boolean; error?: string };
+      if (body.submitted === false) {
+        throw new Error(`Sepolia broadcast rejected: ${body.error ?? "unknown RPC error"}`);
+      }
       if (body.tx_hash) return body.tx_hash;
     }
   }

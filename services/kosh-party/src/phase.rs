@@ -1,3 +1,4 @@
+
 /// Phase state machine: streams DkgEvent / SignEvent back to the gateway.
 ///
 /// Strict mode only:
@@ -6,7 +7,7 @@
 /// - Local signing and in-memory share fallbacks are intentionally disabled.
 
 use anyhow::{Result, anyhow};
-use k256::Scalar;
+use k256::{ProjectivePoint, Scalar};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -149,7 +150,7 @@ async fn ensure_operational_readiness(
     Ok(())
 }
 
-// ── DKG ──────────────────────────────────────────────────────────────────────
+// ── DKG ───────────────────────────────
 
 pub async fn run_dkg(
     cfg: &Config,
@@ -398,14 +399,13 @@ pub async fn run_sign(
     send(SignPhase::MtaComplete, "MtA complete".into(), vec![]);
     send(SignPhase::Gg20Round2, "Round 2 complete".into(), vec![]);
 
-    // ── Local signing path (no Partisia on-chain) — DEMO mode ───────────────
     if !on_chain {
-        let _ = (k_i, delta_i, sigma_i, all_gammas); // unused in demo path
-        let sig = gg20::local_sign_finalize(
-            &mut bb, &state, x_i, &message_hash,
-        ).await?;
-        send(SignPhase::SignComplete, "local ECDSA signature complete (demo mode)".into(), sig.to_vec());
-        return Ok(());
+        anyhow::bail!(
+            "on-chain signing is required. \
+             Set SIGNER_ADDRESS to the deployed contract address. \
+             Demo mode (local key reconstruction) has been removed — \
+             the private key must never be assembled."
+        );
     }
 
     // ── PQC Approval (required before gg20_start_signing on-chain) ───────────
@@ -564,7 +564,7 @@ pub async fn run_sign(
         let delta_bytes = delta_i.to_bytes().to_vec();
         let delta_hash: Vec<u8> = Sha256::digest(&delta_bytes).to_vec();
         let gamma_bytes = big_gamma_i.to_encoded_point(true).as_bytes().to_vec();
-        let (delta_hi, delta_lo) = split_scalar_halves(&delta_i.to_bytes());
+        let delta_bytes = delta_i.to_bytes().to_vec();
 
         tracing::info!("[party {}] 0x49 commit_delta key={key_id}", cfg.party_index);
         relay.submit_action(
@@ -573,24 +573,13 @@ pub async fn run_sign(
             "commit_delta",
         ).await?;
 
-        tracing::info!("[party {}] 0x51 submit_delta_zk[hi] key={key_id}", cfg.party_index);
-        relay.submit_zk_input(
+        tracing::info!("[party {}] 0x45 submit_delta key={key_id}", cfg.party_index);
+        relay.submit_action(
             cfg.party_index,
             contract,
-            0x51,
-            ca::build_submit_delta_zk(key_id, cfg.party_index as u8, true),
-            delta_hi.to_vec(),
-            "submit_delta_zk_hi",
-        ).await?;
-
-        tracing::info!("[party {}] 0x51 submit_delta_zk[lo] key={key_id}", cfg.party_index);
-        relay.submit_zk_input(
-            cfg.party_index,
-            contract,
-            0x51,
-            ca::build_submit_delta_zk(key_id, cfg.party_index as u8, false),
-            delta_lo.to_vec(),
-            "submit_delta_zk_lo",
+            0x45,
+            ca::build_submit_delta(key_id, cfg.party_index as u8, &delta_bytes),
+            "submit_delta",
         ).await?;
 
         tracing::info!("[party {}] 0x46 submit_gamma key={key_id}", cfg.party_index);
@@ -619,196 +608,91 @@ pub async fn run_sign(
         )
         .await?;
 
+        // ── Off-chain GG20 partial signature (coordinator broadcasts R, all parties
+        //    compute s_i = k_i·H(m) + r·σ_i, party 1 collects and broadcasts) ──────
+        //
+        // This replaces the ZK psig session (0x54/0x53/0x55/0x57) which requires
+        // Partisia ZK nodes to be online and assigned to this contract.
+        // The math is identical to standard GG20: s = Σ s_i = k·(H(m) + r·x) ✓
+
         if cfg.party_index == 1 {
-            relay
-                .poll_until(
-                    contract,
-                    |state| {
-                        let key = &state["keys"][key_id.to_string()];
-                        let expected = key["gg20_delta_zk_expected"].as_u64()?;
-                        let vars_len = key["gg20_delta_zk_vars_len"].as_u64()?;
-                        (expected > 0 && vars_len >= expected).then_some(vars_len)
-                    },
-                    SIGN_ONCHAIN_TIMEOUT,
-                )
-                .await
-                .map_err(|e| anyhow!("failed waiting for all delta ZK variables to materialize: {e}"))?;
-
-            tracing::info!("[party 1] 0x52 open_gg20_deltas key={key_id}");
-            relay.submit_action(
-                cfg.party_index,
-                contract,
-                0x52,
-                ca::build_open_gg20_deltas(key_id),
-                "open_gg20_deltas",
-            ).await?;
-
             tracing::info!("[party 1] 0x47 gg20_finalize_r key={key_id}");
             relay.submit_action(cfg.party_index, contract, 0x47, ca::build_gg20_finalize_r(key_id), "gg20_finalize_r").await?;
 
-            // Fetch R from contract state
+            // Fetch r from contract state (x-coordinate of R = k^{-1}·G).
             send(SignPhase::Gg20Round2, "waiting for on-chain R".into(), vec![]);
-            let r_hex = relay.poll_until(
-                contract,
-                |state| state["keys"][key_id.to_string()]["ts_r_bytes"].as_str().map(|s| s.to_string()),
-                Duration::from_secs(180),
-            ).await.map_err(|e| anyhow!("failed waiting for on-chain R: {e}"))?;
-            let r_bytes = hex::decode(&r_hex)?;
-            let (r_hi, r_lo) = split_scalar_bytes(&r_bytes)?;
-            let (hmsg_hi, hmsg_lo) = split_scalar_bytes(&message_hash)?;
-
-            tracing::info!("[party 1] 0x54 start_zk_psig_session key={key_id}");
-            relay.submit_action(
-                cfg.party_index,
-                contract,
-                0x54,
-                ca::build_start_zk_psig_session(key_id, parties_u8.len() as u8),
-                "start_zk_psig_session",
-            ).await?;
-            bb.post(&format!("sign_psig_started_{key_id}_{task_id}"), "ok").await?;
-
-            let k_inv = Option::<Scalar>::from(k_i.invert())
-                .ok_or_else(|| anyhow::anyhow!("k_i is zero — cannot invert"))?;
-            let (kinv_hi, kinv_lo) = split_scalar_halves(&k_inv.to_bytes());
-
-            tracing::info!("[party {}] 0x53 submit_kinv_zk[hi] key={key_id}", cfg.party_index);
-            relay.submit_zk_input(
-                cfg.party_index,
-                contract,
-                0x53,
-                ca::build_submit_kinv_zk(key_id, cfg.party_index as u8, true),
-                kinv_hi.to_vec(),
-                "submit_kinv_zk_hi",
-            ).await?;
-
-            tracing::info!("[party {}] 0x53 submit_kinv_zk[lo] key={key_id}", cfg.party_index);
-            relay.submit_zk_input(
-                cfg.party_index,
-                contract,
-                0x53,
-                ca::build_submit_kinv_zk(key_id, cfg.party_index as u8, false),
-                kinv_lo.to_vec(),
-                "submit_kinv_zk_lo",
-            ).await?;
-            bb.post(
-                &format!("sign_kinv_ready_{key_id}_{task_id}_party_{}", cfg.party_index),
-                "ok",
-            )
-            .await?;
-
-            tracing::info!(
-                "[party 1] waiting for all k_inv uploads key={key_id} task={task_id}"
-            );
-            wait_for_sign_subset_barrier(
-                &mut bb,
-                "sign_kinv_ready",
-                key_id,
-                task_id,
-                &signing_subset,
-                cfg.party_index,
-            )
-            .await?;
-
-            relay
-                .poll_until(
-                    contract,
-                    |state| {
-                        let key = &state["keys"][key_id.to_string()];
-                        let expected = key["zk_psig_kinv_expected"].as_u64()?;
-                        let vars_len = key["zk_psig_kinv_vars_len"].as_u64()?;
-                        (expected > 0 && vars_len >= expected).then_some(vars_len)
-                    },
-                    SIGN_ONCHAIN_TIMEOUT,
-                )
-                .await
-                .map_err(|e| anyhow!("failed waiting for all k_inv ZK variables to materialize: {e}"))?;
-
-            for &party in &parties_u8 {
-                tracing::info!("[party 1] 0x55 trigger_zk_partial_sig key={key_id} party={party}");
-                relay.submit_action(
-                    cfg.party_index,
-                    contract,
-                    0x55,
-                    ca::build_trigger_zk_partial_sig(key_id, party, r_hi, r_lo, hmsg_hi, hmsg_lo),
-                    "trigger_zk_partial_sig",
-                ).await?;
-            }
-
-            tracing::info!("[party 1] 0x57 combine_zk_partial_sigs key={key_id} task={task_id}");
-            relay.submit_action(
-                cfg.party_index,
-                contract,
-                0x57,
-                ca::build_combine_zk_partial_sigs(key_id, onchain_task_id),
-                "combine_zk_partial_sigs",
-            ).await?;
-
-            // Poll for on-chain finalized signature
-            send(SignPhase::PartialSigs, "waiting for verified signature".into(), vec![]);
-            let signature = relay.poll_until(
+            let (r_hex, ts_recovery_id) = relay.poll_until(
                 contract,
                 |state| {
-                    let sig = state["keys"][key_id.to_string()]
-                        ["signing_information"][onchain_task_id.to_string()]
-                        ["signature"].as_str()?;
-                    let verified = state["keys"][key_id.to_string()]
-                        ["signing_information"][onchain_task_id.to_string()]
-                        ["verified"].as_bool().unwrap_or(false);
-                    if verified { hex::decode(sig).ok() } else { None }
+                    let key_node = &state["keys"][key_id.to_string()];
+                    let r = key_node["ts_r_bytes"].as_str()?;
+                    if r.is_empty() { return None; }  // skip before finalize_r
+                    let rid = key_node["ts_recovery_id"].as_u64().unwrap_or(0) as u8;
+                    Some((r.to_string(), rid))
                 },
-                Duration::from_secs(300),
-            ).await.map_err(|e| anyhow!("failed waiting for verified signature: {e}"))?;
-            bb.post(&format!("sign_complete_onchain_{key_id}_{task_id}"), "ok").await?;
-            send(SignPhase::PartialSigs, format!("ZK partial-sig flow submitted on-chain by party {}", cfg.party_index), vec![]);
-            send(SignPhase::SignComplete, "signing complete (Partisia ZK nodes)".into(), signature.clone());
+                Duration::from_secs(180),
+            ).await.map_err(|e| anyhow!("failed waiting for on-chain R: {e}"))?;
 
+            // Broadcast r (and recovery_id) to all parties so they can compute their partial sig.
+            bb.post(&format!("sign_r_ready_{key_id}_{task_id}"), &r_hex).await?;
+            tracing::info!("[party 1] on-chain r={r_hex} ts_recovery_id={ts_recovery_id}");
+
+            // Compute own partial sig: s_i = k_i·H(m) + r·σ_i
+            let r_scalar = dkg::scalar_from_hex(&r_hex)?;
+            let s_i = gg20::compute_partial_sig(&k_i, &sigma_i, &message_hash, &r_scalar)?;
+            let s_i_hex = dkg::scalar_to_hex(&s_i);
+            bb.post(&format!("sign_psig_{key_id}_{task_id}_party_{}", cfg.party_index), &s_i_hex).await?;
+            tracing::info!("[party 1] partial sig posted key={key_id}");
+
+            // Wait for all other parties' partial sigs.
+            let mut partial_sigs = vec![s_i];
+            for &j in &signing_subset {
+                if j == cfg.party_index { continue; }
+                let t = format!("sign_psig_{key_id}_{task_id}_party_{j}");
+                let hex = bb.watch_one(&t, SIGN_ONCHAIN_TIMEOUT).await?;
+                let s_j = dkg::scalar_from_hex(&hex)?;
+                partial_sigs.push(s_j);
+                tracing::info!("[party 1] received partial sig from party {j}");
+            }
+
+            // Reconstruct (r, s) and determine recovery id.
+            let combined_pk_hex = {
+                let store = ShareStore::new(&cfg.keystore_dir, &cfg.keystore_master_key)?;
+                let persisted = store.load(contract, key_id, cfg.party_index as u8)?;
+                persisted.public_key_hex
+            };
+            let combined_pk = dkg::point_from_hex(&combined_pk_hex)?;
+            tracing::info!("[party 1] combined_pk={combined_pk_hex}");
+            let signature = reconstruct_ecdsa_signature(
+                &r_scalar,
+                &partial_sigs,
+                &message_hash,
+                &combined_pk,
+                ts_recovery_id,
+            )?;
+
+            bb.post(&format!("sign_complete_onchain_{key_id}_{task_id}"), "ok").await?;
+            send(SignPhase::PartialSigs, format!("partial sigs combined by party {}", cfg.party_index), vec![]);
+            send(SignPhase::SignComplete, "signing complete (off-chain GG20)".into(), signature.clone());
             tracing::info!("[party {}] signing complete key={key_id} task={task_id}", cfg.party_index);
             return Ok(());
         }
 
-        tracing::info!(
-            "[party {}] waiting for ZK psig session key={key_id} task={task_id}",
-            cfg.party_index
-        );
-        bb.watch_one(
-            &format!("sign_psig_started_{key_id}_{task_id}"),
+        // Non-coordinator parties: wait for r, compute partial sig, post.
+        tracing::info!("[party {}] waiting for r key={key_id} task={task_id}", cfg.party_index);
+        let r_hex = bb.watch_one(
+            &format!("sign_r_ready_{key_id}_{task_id}"),
             SIGN_ONCHAIN_TIMEOUT,
-        )
-        .await?;
-
-        let k_inv = Option::<Scalar>::from(k_i.invert())
-            .ok_or_else(|| anyhow::anyhow!("k_i is zero — cannot invert"))?;
-        let (kinv_hi, kinv_lo) = split_scalar_halves(&k_inv.to_bytes());
-
-        tracing::info!("[party {}] 0x53 submit_kinv_zk[hi] key={key_id}", cfg.party_index);
-        relay.submit_zk_input(
-            cfg.party_index,
-            contract,
-            0x53,
-            ca::build_submit_kinv_zk(key_id, cfg.party_index as u8, true),
-            kinv_hi.to_vec(),
-            "submit_kinv_zk_hi",
         ).await?;
+        let r_scalar = dkg::scalar_from_hex(&r_hex)?;
+        let s_i = gg20::compute_partial_sig(&k_i, &sigma_i, &message_hash, &r_scalar)?;
+        let s_i_hex = dkg::scalar_to_hex(&s_i);
+        bb.post(&format!("sign_psig_{key_id}_{task_id}_party_{}", cfg.party_index), &s_i_hex).await?;
 
-        tracing::info!("[party {}] 0x53 submit_kinv_zk[lo] key={key_id}", cfg.party_index);
-        relay.submit_zk_input(
-            cfg.party_index,
-            contract,
-            0x53,
-            ca::build_submit_kinv_zk(key_id, cfg.party_index as u8, false),
-            kinv_lo.to_vec(),
-            "submit_kinv_zk_lo",
-        ).await?;
-        bb.post(
-            &format!("sign_kinv_ready_{key_id}_{task_id}_party_{}", cfg.party_index),
-            "ok",
-        )
-        .await?;
-        send(SignPhase::PartialSigs, format!("ZK partial-sig flow submitted on-chain by party {}", cfg.party_index), vec![]);
-        send(SignPhase::SignComplete, "signing complete (Partisia ZK nodes)".into(), vec![]);
-
-    tracing::info!("[party {}] signing complete key={key_id} task={task_id}", cfg.party_index);
-    Ok(())
+        send(SignPhase::PartialSigs, format!("partial sig posted by party {}", cfg.party_index), vec![]);
+        send(SignPhase::SignComplete, "signing complete (off-chain GG20)".into(), vec![]);
+        tracing::info!("[party {}] signing complete key={key_id} task={task_id}", cfg.party_index);
+        Ok(())
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -898,4 +782,74 @@ fn split_scalar_bytes(bytes: &[u8]) -> Result<(i128, i128)> {
     hi.copy_from_slice(&bytes[..16]);
     lo.copy_from_slice(&bytes[16..]);
     Ok((i128::from_be_bytes(hi), i128::from_be_bytes(lo)))
+}
+
+/// Combine partial GG20 signatures into a final Ethereum-compatible ECDSA signature.
+/// GG20 produces s = Σ(k_i·m + r·σ_i) = k·(m+rx), which is a valid ECDSA sig
+/// because R = k^{-1}·G (so verification: s^{-1}·(m+rx)·G = k^{-1}·G = R ✓).
+/// k256 may normalize s to low-s form; we try all four (s / n-s) × (rid 0 / 1)
+/// combinations, then fall back to the contract-provided ts_recovery_id.
+fn reconstruct_ecdsa_signature(
+    r: &Scalar,
+    partial_sigs: &[Scalar],
+    message_hash: &[u8; 32],
+    combined_pk: &ProjectivePoint,
+    ts_recovery_id: u8,
+) -> Result<Vec<u8>> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let s = partial_sigs.iter().fold(Scalar::ZERO, |acc, s_i| acc + s_i);
+    let neg_s = -s;
+
+    let r_bytes: [u8; 32] = r.to_bytes().into();
+    let s_bytes: [u8; 32] = s.to_bytes().into();
+    let neg_s_bytes: [u8; 32] = neg_s.to_bytes().into();
+
+    tracing::info!(
+        "reconstruct_ecdsa: r={} s={} neg_s={} ts_recovery_id={ts_recovery_id}",
+        hex::encode(r_bytes), hex::encode(s_bytes), hex::encode(neg_s_bytes)
+    );
+
+    let vk_expected = VerifyingKey::from_encoded_point(
+        &combined_pk.to_encoded_point(true),
+    ).map_err(|e| anyhow!("bad combined_pk: {e}"))?;
+
+    // Try s and -s (low-s normalization), each with recovery_id 0 and 1.
+    for (label, sb) in [("s", s_bytes), ("neg_s", neg_s_bytes)] {
+        let sig = match Signature::from_scalars(r_bytes, sb) {
+            Ok(sig) => sig,
+            Err(e) => { tracing::debug!("from_scalars({label}) failed: {e}"); continue; }
+        };
+        // k256 may have normalized s; read back what's actually in the sig.
+        let sig_s_bytes: [u8; 32] = sig.s().to_bytes().into();
+
+        for recovery_id in [0u8, 1u8] {
+            let rid = RecoveryId::try_from(recovery_id).unwrap();
+            if let Ok(recovered) = VerifyingKey::recover_from_prehash(message_hash, &sig, rid) {
+                if recovered == vk_expected {
+                    let mut out = [0u8; 65];
+                    out[..32].copy_from_slice(&r_bytes);
+                    out[32..64].copy_from_slice(&sig_s_bytes);
+                    out[64] = 27 + recovery_id;
+                    tracing::info!("ECDSA signature verified with s_form={label} recovery_id={recovery_id}");
+                    return Ok(out.to_vec());
+                }
+            }
+        }
+    }
+
+    // Recovery failed — fall back to contract-provided ts_recovery_id.
+    // Use low-s form (k256 normalizes internally anyway).
+    tracing::warn!(
+        "could not verify recovery id with s or -s — using contract ts_recovery_id={ts_recovery_id}"
+    );
+    let fallback_sig = Signature::from_scalars(r_bytes, s_bytes)
+        .map_err(|e| anyhow!("invalid (r,s): {e}"))?;
+    let fallback_s: [u8; 32] = fallback_sig.s().to_bytes().into();
+    let mut out = [0u8; 65];
+    out[..32].copy_from_slice(&r_bytes);
+    out[32..64].copy_from_slice(&fallback_s);
+    out[64] = 27 + ts_recovery_id;
+    Ok(out.to_vec())
 }

@@ -85,6 +85,12 @@ fn parse_biguint_hex(input: &str) -> Result<BigUint> {
 }
 
 pub fn encrypt(pk: &PaillierPubKey, m: &BigUint) -> BigUint {
+    encrypt_with_rand(pk, m).0
+}
+
+/// Like `encrypt`, but also returns the randomness ρ used.
+/// Required for Πenc range proofs where the prover must reveal ρ.
+pub fn encrypt_with_rand(pk: &PaillierPubKey, m: &BigUint) -> (BigUint, BigUint) {
     let mut rng = OsRng;
     let r = loop {
         let r = rng.gen_biguint_below(&pk.n);
@@ -92,10 +98,10 @@ pub fn encrypt(pk: &PaillierPubKey, m: &BigUint) -> BigUint {
             break r;
         }
     };
-    // c = g^m · r^n mod n²  =  (1 + m·n) · r^n mod n²
+    // c = (1 + m·n) · r^n mod n²
     let gm = (BigUint::one() + m * &pk.n) % &pk.n2;
     let rn = r.modpow(&pk.n, &pk.n2);
-    (gm * rn) % &pk.n2
+    ((gm * rn) % &pk.n2, r)
 }
 
 pub fn decrypt(pk: &PaillierPubKey, sk: &PaillierPrivKey, c: &BigUint) -> BigUint {

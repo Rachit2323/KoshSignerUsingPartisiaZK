@@ -110,7 +110,7 @@ type AppState = {
 
 const storageKey = "kosh-frontend-threshold-state-v5";
 const defaultContractAddress = "0353980c937b95faac89ee9af366471b64d9206f2e";
-const defaultKeyId = 63001;
+const defaultKeyId = 1659603443;
 const defaultRecipient = "0xb0538910f0Abffc41F0CF701E626975E51e92bC7" as Hex;
 const defaultApiBaseUrl = "http://127.0.0.1:8080";
 const legacyContractAddresses = new Set([
@@ -120,7 +120,7 @@ const legacyContractAddresses = new Set([
 ]);
 
 function normalizeSignerAddress(value: string): string {
-  const trimmed = value.trim();
+  const trimmed = value.trim().toLowerCase();
   if (!trimmed) return defaultContractAddress;
   if (legacyContractAddresses.has(trimmed)) return defaultContractAddress;
   return trimmed;
@@ -966,10 +966,13 @@ function render(): void {
       <div class="eyebrow">Step 2 — Key</div>
       <div class="grid section">
         <label>Contract Address
-          <input id="signerAddress" value="${escapeAttr(state.signerAddress)}" />
+          <input id="signerAddress" value="${escapeAttr(state.signerAddress || defaultContractAddress)}" placeholder="0353980c937b95faac89ee9af366471b64d9206f2e" />
         </label>
         <label>Backend URL
-          <input id="apiBaseUrl" value="${escapeAttr(state.apiBaseUrl)}" />
+          <input id="apiBaseUrl" value="${escapeAttr(state.apiBaseUrl || defaultApiBaseUrl)}" placeholder="http://127.0.0.1:8080" />
+        </label>
+        <label>Key ID
+          <input id="keyId" type="number" value="${state.keyId || defaultKeyId}" placeholder="${defaultKeyId}" />
         </label>
         ${!keyExists ? `<label>Number of Parties
           <input id="numParties" type="number" min="2" max="10" value="${state.numParties}" />
@@ -1125,6 +1128,7 @@ function bindEvents(): void {
   const signerInput = document.querySelector<HTMLInputElement>("#signerAddress");
   const apiBaseUrlInput = document.querySelector<HTMLInputElement>("#apiBaseUrl");
   const numPartiesInput = document.querySelector<HTMLInputElement>("#numParties");
+  const keyIdInput = document.querySelector<HTMLInputElement>("#keyId");
   const recipientInput = document.querySelector<HTMLInputElement>("#recipient");
   const amountInput = document.querySelector<HTMLInputElement>("#amountWei");
 
@@ -1140,6 +1144,10 @@ function bindEvents(): void {
   });
   apiBaseUrlInput?.addEventListener("input", (e) => {
     state.apiBaseUrl = (e.target as HTMLInputElement).value;
+    persist();
+  });
+  keyIdInput?.addEventListener("input", (e) => {
+    state.keyId = Number((e.target as HTMLInputElement).value || String(defaultKeyId));
     persist();
   });
   numPartiesInput?.addEventListener("input", (e) => {
